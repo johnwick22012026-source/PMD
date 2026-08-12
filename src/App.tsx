@@ -51,6 +51,40 @@ type CycleState = {
   completedFocusSessions: number
 }
 
+type PresetKey = 'classic' | 'deepWork' | 'custom'
+
+type DurationPreset = Pick<TimerSettings, DurationFieldKey>
+
+const PRESET_DURATION_SETTINGS: Record<Exclude<PresetKey, 'custom'>, DurationPreset> = {
+  classic: {
+    focus: 25,
+    shortBreak: 5,
+    longBreak: 15,
+    sessionsBeforeLongBreak: 4,
+  },
+  deepWork: {
+    focus: 90,
+    shortBreak: 15,
+    longBreak: 30,
+    sessionsBeforeLongBreak: 2,
+  },
+}
+
+const PRESET_CONFIG: Record<PresetKey, { label: string; description: string }> = {
+  classic: {
+    label: 'Classic',
+    description: '25 / 5 / 15 • 4-cycle rhythm',
+  },
+  deepWork: {
+    label: 'Deep Work',
+    description: '90 / 15 / 30 • 2-cycle focus',
+  },
+  custom: {
+    label: 'Custom',
+    description: 'Fine tune durations in Settings',
+  },
+}
+
 const DEFAULT_TIMER_SETTINGS: TimerSettings = {
   focus: 25,
   shortBreak: 5,
@@ -249,6 +283,19 @@ const getSessionDurationMs = (mode: SessionMode, settings: TimerSettings) => {
   }
 }
 
+const durationsMatch = (candidate: DurationPreset, settings: TimerSettings) =>
+  candidate.focus === settings.focus &&
+  candidate.shortBreak === settings.shortBreak &&
+  candidate.longBreak === settings.longBreak &&
+  candidate.sessionsBeforeLongBreak === settings.sessionsBeforeLongBreak
+
+const getActivePreset = (settings: TimerSettings): PresetKey =>
+  durationsMatch(PRESET_DURATION_SETTINGS.classic, settings)
+    ? 'classic'
+    : durationsMatch(PRESET_DURATION_SETTINGS.deepWork, settings)
+      ? 'deepWork'
+      : 'custom'
+
 const stateCopy: Record<TimerPhase, { headline: string; description: string }> = {
   idle: {
     headline: 'Ready to focus',
@@ -290,7 +337,7 @@ export default function App() {
     resolvePreferredTheme,
     isTheme,
   )
-  const [timerSettings] = usePersistedState<TimerSettings>(
+  const [timerSettings, setTimerSettings] = usePersistedState<TimerSettings>(
     TIMER_SETTINGS_KEY,
     () => ({ ...DEFAULT_TIMER_SETTINGS }),
     isTimerSettings,
@@ -314,6 +361,29 @@ export default function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme
   }, [theme])
+
+  const [selectedPreset, setSelectedPreset] = useState<PresetKey>(() => getActivePreset(timerSettings))
+  const customConfigCTARef = useRef<HTMLButtonElement>(null)
+
+  // Keep selectedPreset in sync when timerSettings change externally
+  useEffect(() => {
+    setSelectedPreset(getActivePreset(timerSettings))
+  }, [timerSettings])
+
+  useEffect(() => {
+    if (selectedPreset === 'custom') {
+      customConfigCTARef.current?.focus()
+    }
+  }, [selectedPreset])
+
+  const handleSelectPreset = (preset: PresetKey) => {
+    if (preset === 'custom') {
+      setSelectedPreset('custom')
+      return
+    }
+    setTimerSettings((prev) => ({ ...prev, ...PRESET_DURATION_SETTINGS[preset] }))
+    setSelectedPreset(preset)
+  }
 
   const safeCycleLength = Math.max(1, timerSettings.sessionsBeforeLongBreak)
   const currentCycleIndex = Math.min(cycleState.focusStreak + 1, safeCycleLength)
@@ -506,6 +576,26 @@ export default function App() {
     }
   }, [sessionMode])
 
+  const presetButtonClasses = (key: PresetKey) => {
+    const baseStyles = 'flex-1 min-w-[120px] rounded-2xl border px-4 py-3 text-left transition-colors duration-200'
+    const focused = `${sharedTokens.motion} ${sharedTokens.focusRing}`
+    const isActive = selectedPreset === key
+    const palette =
+      key === 'custom'
+        ? 'border-dashed border-amber-300/70 bg-amber-500/10 text-amber-100'
+        : isActive
+          ? 'border-emerald-400/60 bg-emerald-500/10 text-emerald-50'
+          : 'border-slate-700/80 bg-slate-900/60 text-slate-200 hover:border-slate-500'
+    return `${baseStyles} ${focused} ${palette}`
+  }
+
+  const presetDurationRows: { label: string; value: string }[] = [
+    { label: 'Focus', value: `${timerSettings.focus} min` },
+    { label: 'Short break', value: `${timerSettings.shortBreak} min` },
+    { label: 'Long break', value: `${timerSettings.longBreak} min` },
+    { label: 'Cycles before long break', value: `${timerSettings.sessionsBeforeLongBreak}` },
+  ]
+
   return (
     <div className={rootClasses}>
       <div className="max-w-6xl mx-auto px-4 py-6 md:py-10 space-y-8">
@@ -598,6 +688,56 @@ export default function App() {
               <h2 className="text-lg font-semibold">{status.headline}</h2>
               <span className={`px-2 py-1 text-xs uppercase rounded ${statusBadgeStyles[timerPhase]}`}>{timerPhase}</span>
             </div>
+
+            <div className="space-y-4">
+              <div>
+                <p className="text-xs uppercase tracking-[0.35em] text-slate-400">Session preset</p>
+                <div className="mt-3 grid gap-3 md:grid-cols-3">
+                  {(['classic', 'deepWork', 'custom'] as PresetKey[]).map((preset) => {
+                    const config = PRESET_CONFIG[preset]
+                    return (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => handleSelectPreset(preset)}
+                        className={presetButtonClasses(preset)}
+                        aria-pressed={selectedPreset === preset}
+                      >
+                        <span className="text-sm font-semibold uppercase tracking-[0.3em]">
+                          {config.label}
+                        </span>
+                        <p className="text-[0.65rem] text-slate-300">{config.description}</p>
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                {presetDurationRows.map((row) => (
+                  <div
+                    key={row.label}
+                    className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3"
+                  >
+                    <p className="text-xs uppercase tracking-[0.35em] text-slate-400">{row.label}</p>
+                    <p className="text-lg font-semibold">{row.value}</p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/10 pt-4 text-sm">
+                <p className="text-slate-400">Refine your rhythm anytime with the full settings panel.</p>
+                <button
+                  ref={customConfigCTARef}
+                  type="button"
+                  onClick={() => setSelectedPreset('custom')}
+                  className={`${sharedTokens.motion} ${sharedTokens.focusRing} rounded-full border border-slate-500/60 bg-slate-900/80 px-5 py-2 text-xs uppercase tracking-[0.3em] text-white shadow-lg shadow-slate-950/40 transition hover:border-sky-500/80`}
+                >
+                  Open settings
+                </button>
+              </div>
+            </div>
+
             <div className="flex justify-center">
               <div
                 className="relative flex items-center justify-center rounded-full"
