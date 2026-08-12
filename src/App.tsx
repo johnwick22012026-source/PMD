@@ -315,6 +315,25 @@ export default function App() {
     document.documentElement.dataset.theme = theme
   }, [theme])
 
+  const safeCycleLength = Math.max(1, timerSettings.sessionsBeforeLongBreak)
+  const currentCycleIndex = Math.min(cycleState.focusStreak + 1, safeCycleLength)
+  const completedPomodoros = cycleState.completedFocusSessions
+
+  const cycleSegments = useMemo(() => {
+    const completedInCycle = Math.min(cycleState.focusStreak, safeCycleLength)
+    return Array.from({ length: safeCycleLength }, (_, idx) => {
+      if (idx < completedInCycle) {
+        return { index: idx, status: 'completed' as const }
+      }
+      if (idx === completedInCycle) {
+        return { index: idx, status: 'current' as const }
+      }
+      return { index: idx, status: 'pending' as const }
+    })
+  }, [safeCycleLength, cycleState.focusStreak])
+
+  const longBreakMilestoneIndex = safeCycleLength - 1
+
   const [sessionMode, setSessionMode] = useState<SessionMode>('focus')
   const [timerPhase, setTimerPhase] = useState<TimerPhase>('idle')
   const [remainingMs, setRemainingMs] = useState(() => getSessionDurationMs('focus', timerSettings))
@@ -374,7 +393,7 @@ export default function App() {
       const difference = Math.max(0, target - now)
       setRemainingMs(difference)
       if (difference <= 0) {
-        window.clearInterval(timerIntervalRef.current!)
+        window.clearInterval(timerIntervalRef.current!)    
         timerIntervalRef.current = null
         handleCompletion()
       }
@@ -514,7 +533,98 @@ export default function App() {
         </header>
 
         <main className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
-          {/* Timer and controls section omitted for brevity */}
+          <section
+            className={`${getSurfaceStyles(theme, 'card')} ${sharedTokens.cardCorners} ${sharedTokens.cardPadding} space-y-6 border border-white/10`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <p className="text-xs uppercase tracking-[0.3em] text-slate-400">Cycle</p>
+                <p className="text-2xl font-semibold tracking-tight">Cycle {currentCycleIndex} of {safeCycleLength}</p>
+              </div>
+              <div className="rounded-full border border-slate-500/30 bg-slate-900/60 px-4 py-2 text-xs font-semibold uppercase tracking-[0.35em] text-slate-200">
+                Completed Pomodoros {completedPomodoros}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center gap-4 text-sm text-slate-400">
+                <span className="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-emerald-500/10 text-emerald-300">
+                  {timerSettings.sessionsBeforeLongBreak === 0 ? 0 : longBreakMilestoneIndex + 1}
+                </span>
+                <p className="text-sm text-slate-400">
+                  {`You are ${cycleState.focusStreak === longBreakMilestoneIndex ? 'on the final focus before' : 'building toward'} the long-break milestone to stay refreshed.`}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                {cycleSegments.map((segment) => {
+                  const base = 'flex-1 min-w-[64px] rounded-2xl border px-3 py-2 text-center transition duration-200'
+                  const isMilestone = segment.index === longBreakMilestoneIndex
+                  const statusClass =
+                    segment.status === 'completed'
+                      ? 'bg-emerald-500/90 text-slate-950 border-transparent'
+                      : segment.status === 'current'
+                        ? 'bg-slate-200 text-slate-900 border-slate-300 shadow-lg'
+                        : 'bg-slate-900/60 text-slate-200 border-slate-800'
+                  const milestoneRing = isMilestone ? 'ring-2 ring-amber-400/70' : ''
+                  return (
+                    <div
+                      key={`cycle-${segment.index}`}
+                      className={`${base} ${statusClass} ${milestoneRing} flex flex-col gap-1 justify-center`}
+                      aria-label={`Cycle step ${segment.index + 1} ${isMilestone ? '(long break milestone)' : ''}`}
+                    >
+                      <span className="text-xs uppercase tracking-[0.35em] text-slate-400">
+                        Step {segment.index + 1}
+                      </span>
+                      <span className="text-lg font-semibold">
+                        {segment.index + 1}
+                      </span>
+                      {isMilestone && (
+                        <span className="text-[0.6rem] uppercase tracking-[0.4em] text-amber-300">
+                          Long break
+                        </span>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </section>
+
+          {/* Timer and controls section */}
+          <section
+            className={`${getSurfaceStyles(theme, 'card')} ${sharedTokens.cardCorners} ${sharedTokens.cardPadding} space-y-6 border border-white/10`}
+          >
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold">{status.headline}</h2>
+              <span className={`px-2 py-1 text-xs uppercase rounded ${statusBadgeStyles[timerPhase]}`}>{timerPhase}</span>
+            </div>
+            <div className="flex justify-center">
+              <div
+                className="relative flex items-center justify-center rounded-full"
+                style={{ width: '200px', height: '200px', background: circleBackground }}
+              >
+                <span className="text-5xl font-mono tabular-nums">{formatTime(remainingMs)}</span>
+              </div>
+            </div>
+            <p className="text-center text-sm text-slate-400">{status.description}</p>
+            <div className="flex justify-center gap-4">
+              <button
+                type="button"
+                onClick={primaryButton.action}
+                className="rounded-full bg-sky-500 px-5 py-2 text-white hover:bg-sky-600 focus:outline-none"
+              >
+                {primaryButton.label}
+              </button>
+              <button
+                type="button"
+                onClick={resetTimer}
+                disabled={!activeState}
+                className="rounded-full bg-slate-200 px-5 py-2 text-slate-800 hover:bg-slate-300 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Reset
+              </button>
+            </div>
+          </section>
         </main>
       </div>
     </div>
