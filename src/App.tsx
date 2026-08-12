@@ -37,6 +37,7 @@ type HistoryEntry = {
   label: string
   time: string
   type: 'focus' | 'shortBreak' | 'longBreak'
+  durationMs?: number
 }
 
 type SessionMode = 'focus' | 'shortBreak' | 'longBreak'
@@ -145,7 +146,8 @@ const isHistoryEntry = (value: unknown): value is HistoryEntry =>
   isObject(value) &&
   typeof (value as any).label === 'string' &&
   typeof (value as any).time === 'string' &&
-  ['focus', 'shortBreak', 'longBreak'].includes((value as any).type)
+  ['focus', 'shortBreak', 'longBreak'].includes((value as any).type) &&
+  ((value as any).durationMs === undefined || typeof (value as any).durationMs === 'number')
 
 const isHistory = (value: unknown): value is HistoryEntry[] =>
   Array.isArray(value) && value.every(isHistoryEntry)
@@ -283,6 +285,19 @@ const normalizeNotificationPermission = (value: NotificationPermission): Notific
   if (value === 'granted') return 'granted'
   if (value === 'denied') return 'denied'
   return 'default'
+}
+
+const formatDurationLabel = (milliseconds: number) => {
+  if (milliseconds <= 0) {
+    return '0m'
+  }
+  const totalMinutes = Math.floor(milliseconds / 1000 / 60)
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`
+  }
+  return `${minutes}m`
 }
 
 export default function App() {
@@ -466,9 +481,15 @@ export default function App() {
         setRemainingMs(0)
         targetEndRef.current = null
 
+        const sessionDurationMs = getSessionDurationMs(sessionMode, timerSettings)
         setHistory(prev => [
           ...prev,
-          { label: sessionLabels[sessionMode], time: new Date().toISOString(), type: sessionMode },
+          {
+            label: sessionLabels[sessionMode],
+            time: new Date().toISOString(),
+            type: sessionMode,
+            durationMs: sessionDurationMs,
+          },
         ])
 
         setCycleState(prev => {
@@ -488,7 +509,7 @@ export default function App() {
   }, [
     timerPhase,
     sessionMode,
-    timerSettings.sessionsBeforeLongBreak,
+    timerSettings,
     playCompletionTone,
     cycleState.focusStreak,
     showSessionNotification,
@@ -606,6 +627,57 @@ export default function App() {
     return 'Notifications unavailable'
   }, [notificationPermission, notificationSupported])
 
+  const focusHistory = history.filter(entry => entry.type === 'focus')
+  const breakHistory = history.filter(entry => entry.type !== 'focus')
+  const totalFocusMs = focusHistory.reduce((acc, entry) => acc + (entry.durationMs ?? getSessionDurationMs('focus', timerSettings)), 0)
+  const longestFocusMs = focusHistory.reduce(
+    (max, entry) => Math.max(max, entry.durationMs ?? 0),
+    0,
+  )
+  const currentCycleLabel = `${Math.max(cycleState.focusStreak, 0)}/${timerSettings.sessionsBeforeLongBreak}`
+  const focusTimeLabel = formatDurationLabel(totalFocusMs)
+  const longestFocusLabel = longestFocusMs > 0 ? formatDurationLabel(longestFocusMs) : '—'
+  const focusMinutes = Math.round(totalFocusMs / 1000 / 60)
+  const statsRows = [
+    {
+      label: 'Focus Time',
+      value: focusTimeLabel,
+      meta: `${focusMinutes} min`,
+    },
+    {
+      label: 'Pomodoros',
+      value: `${focusHistory.length}`,
+      meta: 'Completed focus sessions',
+    },
+    {
+      label: 'Sessions',
+      value: `${history.length}`,
+      meta: 'All sessions today',
+    },
+    {
+      label: 'Current Streak',
+      value: `${cycleState.focusStreak}`,
+      meta: `Consecutive focus sessions`,
+    },
+  ]
+  const extraStats = [
+    {
+      label: 'Breaks',
+      value: `${breakHistory.length}`,
+      meta: 'Short + long',
+    },
+    {
+      label: 'Current Cycle',
+      value: currentCycleLabel,
+      meta: `${cycleState.focusStreak > 0 ? 'In progress' : 'Resting'}`,
+    },
+    {
+      label: 'Longest Focus',
+      value: longestFocusLabel,
+      meta: 'Longest uninterrupted session',
+    },
+  ]
+
   const rootClasses = `${getSurfaceStyles(theme)} min-h-screen flex flex-col ${sharedTokens.motion}`
 
   const handleTaskSubmit = useCallback(
@@ -705,6 +777,47 @@ export default function App() {
                   </span>
                 )}
               </div>
+            </div>
+          </section>
+          <section className="rounded-3xl border border-slate-200 bg-white/80 dark:border-slate-700 dark:bg-slate-900/70 px-5 py-6 shadow-lg shadow-slate-400/10">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-[0.4em] text-slate-400 dark:text-slate-500">Today</p>
+                <h3 className="text-xl font-semibold text-slate-900 dark:text-slate-50">
+                  Productivity summary
+                </h3>
+              </div>
+              <span className="text-xs font-mono tracking-[0.2em] text-slate-400 dark:text-slate-500">
+                Updated live
+              </span>
+            </div>
+            <div className="mt-6 grid gap-4 grid-cols-2 md:grid-cols-4">
+              {statsRows.map(row => (
+                <article
+                  key={row.label}
+                  className="rounded-2xl border border-slate-100 bg-slate-50/80 px-4 py-3 text-slate-900 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-50"
+                >
+                  <p className="text-xs uppercase tracking-[0.3em] text-slate-400 dark:text-slate-500">{row.label}</p>
+                  <p className="mt-2 text-2xl font-semibold">{row.value}</p>
+                  <p className="text-[0.65rem] uppercase tracking-[0.3em] text-slate-500 dark:text-slate-400">
+                    {row.meta}
+                  </p>
+                </article>
+              ))}
+            </div>
+            <div className="mt-4 grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
+              {extraStats.map(stat => (
+                <article
+                  key={stat.label}
+                  className="rounded-2xl border border-slate-100 bg-white/60 px-4 py-3 text-slate-900 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-50"
+                >
+                  <p className="text-xs uppercase tracking-[0.3em] text-slate-400 dark:text-slate-500">{stat.label}</p>
+                  <p className="mt-2 text-xl font-semibold">{stat.value}</p>
+                  <p className="text-[0.65rem] uppercase tracking-[0.3em] text-slate-500 dark:text-slate-400">
+                    {stat.meta}
+                  </p>
+                </article>
+              ))}
             </div>
           </section>
           <section className="flex flex-col items-center gap-4">
