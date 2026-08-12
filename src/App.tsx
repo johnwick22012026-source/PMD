@@ -1,7 +1,18 @@
-import React, { Dispatch, SetStateAction, useCallback, useEffect, useMemo, useState } from 'react'
+import React, {
+  Dispatch,
+  SetStateAction,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 
 // Keys for persisted storage
 const TIMER_SETTINGS_KEY = 'pomodoro_timer_settings'
+const TIMER_STATE_KEY = 'pomodoro_timer_state'
+const TIMER_STATE_VERSION = 1
+const MINUTE_MS = 60 * 1000
 
 // Timer settings structure
 type TimerSettings = {
@@ -13,6 +24,9 @@ type TimerSettings = {
   autoStartBreaks: boolean
   soundEnabled: boolean
 }
+
+type TimerSession = 'focus' | 'shortBreak' | 'longBreak'
+type TimerStatus = 'IDLE' | 'RUNNING' | 'PAUSED'
 
 type StorageValidator<T> = (value: unknown) => value is T
 
@@ -27,7 +41,85 @@ type ShortcutHint = {
   description: string
 }
 
-// Preset duration values
+type TimerState = {
+  version: number
+  session: TimerSession
+  status: TimerStatus
+  durationMs: number
+  remainingMs: number
+  endAt: number | null
+  cycleCount: number
+  completionToken: string
+}
+
+type PersistedTimerState = {
+  version?: number
+  session: TimerSession
+  status: TimerStatus
+  durationMs: number
+  remainingMs: number
+  endAt: number | null
+  cycleCount: number
+  completionToken?: string
+}
+
+const TIMER_SESSIONS: TimerSession[] = ['focus', 'shortBreak', 'longBreak']
+const TIMER_STATUSES: TimerStatus[] = ['IDLE', 'RUNNING', 'PAUSED']
+
+const isTimerSession = (value: unknown): value is TimerSession =>
+  typeof value === 'string' && TIMER_SESSIONS.includes(value as TimerSession)
+
+const isTimerStatus = (value: unknown): value is TimerStatus =>
+  typeof value === 'string' && TIMER_STATUSES.includes(value as TimerStatus)
+
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
+
+const generateToken = (session: TimerSession, endAt: number | null) =>
+  `${session}-${endAt ?? 'idle'}-${Date.now()}-${Math.random().toString(16).slice(2)}`
+
+const getSessionDurationMs = (session: TimerSession, settings: TimerSettings) => {
+  switch (session) {
+    case 'focus':
+      return settings.focus * MINUTE_MS
+    case 'shortBreak':
+      return settings.shortBreak * MINUTE_MS
+    case 'longBreak':
+      return settings.longBreak * MINUTE_MS
+    default:
+      return settings.focus * MINUTE_MS
+  }
+}
+
+const computeNextSession = (
+  current: TimerSession,
+  cycleCount: number,
+  sessionsBeforeLongBreak: number,
+): { nextSession: TimerSession; nextCycleCount: number } => {
+  if (current === 'focus') {
+    const incremented = cycleCount + 1
+    if (incremented >= sessionsBeforeLongBreak) {
+      return { nextSession: 'longBreak', nextCycleCount: 0 }
+    }
+    return { nextSession: 'shortBreak', nextCycleCount: incremented }
+  }
+
+  if (current === 'longBreak') {
+    return { nextSession: 'focus', nextCycleCount: 0 }
+  }
+
+  return { nextSession: 'focus', nextCycleCount: cycleCount }
+}
+
+const DEFAULT_TIMER_SETTINGS: TimerSettings = {
+  focus: 25,
+  shortBreak: 5,
+  longBreak: 15,
+  sessionsBeforeLongBreak: 4,
+  autoStartFocus: false,
+  autoStartBreaks: false,
+  soundEnabled: true,
+}
+
 const PRESET_DURATION_SETTINGS: Record<Exclude<PresetKey, 'custom'>, DurationPreset> = {
   classic: {
     focus: 25,
@@ -43,7 +135,6 @@ const PRESET_DURATION_SETTINGS: Record<Exclude<PresetKey, 'custom'>, DurationPre
   },
 }
 
-// Preset labels/descriptions
 const PRESET_CONFIG: Record<PresetKey, { label: string; description: string }> = {
   classic: {
     label: 'Classic',
@@ -59,25 +150,12 @@ const PRESET_CONFIG: Record<PresetKey, { label: string; description: string }> =
   },
 }
 
-// Default timer settings
-const DEFAULT_TIMER_SETTINGS: TimerSettings = {
-  focus: 25,
-  shortBreak: 5,
-  longBreak: 15,
-  sessionsBeforeLongBreak: 4,
-  autoStartFocus: false,
-  autoStartBreaks: false,
-  soundEnabled: true,
-}
-
-// Keyboard shortcut hints
 const shortcutHints: ShortcutHint[] = [
   { shortcut: 'Space', description: 'Start or pause the currently selected timer' },
   { shortcut: 'R', description: 'Reset the current session timer' },
   { shortcut: 'S', description: 'Skip ahead to the next session' },
 ]
 
-// Validate that a parsed value is TimerSettings
 const isTimerSettings: StorageValidator<TimerSettings> = (value): value is TimerSettings => {
   if (typeof value !== 'object' || value === null) return false
 
@@ -93,7 +171,6 @@ const isTimerSettings: StorageValidator<TimerSettings> = (value): value is Timer
   )
 }
 
-// Hook: detect prefers-reduced-motion
 const usePrefersReducedMotion = () => {
   const [prefersReduced, setPrefersReduced] = useState(false)
 
@@ -111,24 +188,29 @@ const usePrefersReducedMotion = () => {
   return prefersReduced
 }
 
-// Hook: persisted state to localStorage with validator
 const usePersistedState = <T,>(
   key: string,
-  fallback: () => T,
-  validator: StorageValidator<T>,
+  defaultValue: () => T,
+  validator?: StorageValidator<T>,
 ): [T, Dispatch<SetStateAction<T>>] => {
   const [state, setState] = useState<T>(() => {
-    if (typeof window === 'undefined') return fallback()
+    if (typeof window === 'undefined') {
+      return defaultValue()
+    }
+
     try {
       const stored = window.localStorage.getItem(key)
       if (stored) {
-        const parsed = JSON.parse(stored)
-        if (validator(parsed)) return parsed
+        const parsed: unknown = JSON.parse(stored)
+        if (!validator || validator(parsed)) {
+          return parsed
+        }
       }
     } catch {
-      // ignore
+      // ignore parsing or access errors
     }
-    return fallback()
+
+    return defaultValue()
   })
 
   useEffect(() => {
@@ -136,11 +218,49 @@ const usePersistedState = <T,>(
     try {
       window.localStorage.setItem(key, JSON.stringify(state))
     } catch {
-      // ignore
+      // ignore storage write failures
     }
   }, [key, state])
 
   return [state, setState]
+}
+
+const buildIdleState = (
+  session: TimerSession,
+  cycleCount: number,
+  settings: TimerSettings,
+): TimerState => {
+  const durationMs = getSessionDurationMs(session, settings)
+  return {
+    version: TIMER_STATE_VERSION,
+    session,
+    status: 'IDLE',
+    durationMs,
+    remainingMs: durationMs,
+    endAt: null,
+    cycleCount,
+    completionToken: generateToken(session, null),
+  }
+}
+
+const getPersistedStateGuard = (value: unknown): value is PersistedTimerState => {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as Record<string, unknown>
+  return (
+    isTimerSession(candidate.session) &&
+    isTimerStatus(candidate.status) &&
+    typeof candidate.durationMs === 'number' &&
+    typeof candidate.remainingMs === 'number' &&
+    (typeof candidate.endAt === 'number' || candidate.endAt === null) &&
+    typeof candidate.cycleCount === 'number'
+  )
+}
+
+const formatTime = (milliseconds: number) => {
+  const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
 }
 
 export default function App() {
@@ -150,14 +270,12 @@ export default function App() {
 
   const rootClasses = 'min-h-screen px-6 py-10 bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-50'
 
-  // Persisted settings state
   const [timerSettings, setTimerSettings] = usePersistedState<TimerSettings>(
     TIMER_SETTINGS_KEY,
     () => DEFAULT_TIMER_SETTINGS,
     isTimerSettings,
   )
 
-  // Determine which preset matches current durations
   const presetKey: PresetKey = useMemo(() => {
     const { focus, shortBreak, longBreak, sessionsBeforeLongBreak } = timerSettings
     if (
@@ -179,203 +297,502 @@ export default function App() {
     return 'custom'
   }, [timerSettings])
 
-  // Handlers for preset and custom durations
   const handlePresetSelect = useCallback(
     (key: Exclude<PresetKey, 'custom'>) => {
-      setTimerSettings(prev => ({ ...prev, ...PRESET_DURATION_SETTINGS[key] }))
+      setTimerSettings((prev: TimerSettings) => ({ ...prev, ...PRESET_DURATION_SETTINGS[key] }))
     },
     [setTimerSettings],
   )
 
   const handleDurationChange = useCallback(
     (field: DurationFieldKey, value: number) => {
-      setTimerSettings(prev => ({ ...prev, [field]: value }))
+      setTimerSettings((prev: TimerSettings) => ({ ...prev, [field]: value }))
     },
     [setTimerSettings],
   )
 
   const toggleAutoStartFocus = useCallback(() => {
-    setTimerSettings(prev => ({ ...prev, autoStartFocus: !prev.autoStartFocus }))
+    setTimerSettings((prev: TimerSettings) => ({ ...prev, autoStartFocus: !prev.autoStartFocus }))
   }, [setTimerSettings])
 
   const toggleAutoStartBreaks = useCallback(() => {
-    setTimerSettings(prev => ({ ...prev, autoStartBreaks: !prev.autoStartBreaks }))
+    setTimerSettings((prev: TimerSettings) => ({ ...prev, autoStartBreaks: !prev.autoStartBreaks }))
   }, [setTimerSettings])
 
   const toggleSound = useCallback(() => {
-    setTimerSettings(prev => ({ ...prev, soundEnabled: !prev.soundEnabled }))
+    setTimerSettings((prev: TimerSettings) => ({ ...prev, soundEnabled: !prev.soundEnabled }))
   }, [setTimerSettings])
+
+  const completionGuardRef = useRef<string | null>(null)
+
+  const completeSessionState = useCallback(
+    (state: TimerState, now: number): TimerState | null => {
+      if (completionGuardRef.current === state.completionToken) return null
+      completionGuardRef.current = state.completionToken
+      const { nextSession, nextCycleCount } = computeNextSession(
+        state.session,
+        state.cycleCount,
+        timerSettings.sessionsBeforeLongBreak,
+      )
+      const durationMs = getSessionDurationMs(nextSession, timerSettings)
+      const shouldAutoStart = nextSession === 'focus' ? timerSettings.autoStartFocus : timerSettings.autoStartBreaks
+      const endAt = shouldAutoStart ? now + durationMs : null
+      const status: TimerStatus = shouldAutoStart ? 'RUNNING' : 'IDLE'
+      const nextToken = generateToken(nextSession, endAt)
+
+      return {
+        version: TIMER_STATE_VERSION,
+        session: nextSession,
+        status,
+        durationMs,
+        remainingMs: durationMs,
+        endAt,
+        cycleCount: nextCycleCount,
+        completionToken: nextToken,
+      }
+    },
+    [timerSettings],
+  )
+
+  const [timerState, setTimerState] = useState<TimerState>(() =>
+    buildIdleState('focus', 0, DEFAULT_TIMER_SETTINGS),
+  )
+
+  const hydrateTimerFromStorage = useCallback(() => {
+    if (typeof window === 'undefined') return
+
+    try {
+      const stored = window.localStorage.getItem(TIMER_STATE_KEY)
+      if (!stored) {
+        setTimerState(prev => buildIdleState(prev.session, prev.cycleCount, timerSettings))
+        return
+      }
+      const parsed: unknown = JSON.parse(stored)
+      if (!getPersistedStateGuard(parsed)) {
+        setTimerState(prev => buildIdleState(prev.session, prev.cycleCount, timerSettings))
+        return
+      }
+
+      const durationMs = getSessionDurationMs(parsed.session, timerSettings)
+      const now = Date.now()
+      let normalizedRemaining = clamp(parsed.remainingMs ?? durationMs, 0, durationMs)
+      let normalizedEndAt = parsed.endAt
+      const cycleCount = Number.isNaN(parsed.cycleCount) ? 0 : parsed.cycleCount
+      const completionToken = parsed.completionToken ?? generateToken(parsed.session, parsed.endAt)
+
+      if (parsed.status === 'RUNNING') {
+        const derivedRemaining = parsed.endAt ? Math.max(0, parsed.endAt - now) : normalizedRemaining
+        normalizedRemaining = clamp(derivedRemaining, 0, durationMs)
+        if (normalizedRemaining <= 0) {
+          const baseState: TimerState = {
+            version: TIMER_STATE_VERSION,
+            session: parsed.session,
+            status: 'RUNNING',
+            durationMs,
+            remainingMs: 0,
+            endAt: parsed.endAt,
+            cycleCount,
+            completionToken,
+          }
+          const completed = completeSessionState(baseState, now)
+          if (completed) {
+            setTimerState(completed)
+            return
+          }
+          normalizedRemaining = durationMs
+          normalizedEndAt = null
+        } else {
+          normalizedEndAt = parsed.endAt && parsed.endAt > now ? parsed.endAt : now + normalizedRemaining
+        }
+      } else if (parsed.status === 'PAUSED') {
+        normalizedEndAt = null
+      } else {
+        normalizedEndAt = null
+        normalizedRemaining = clamp(normalizedRemaining, 0, durationMs)
+      }
+
+      let normalizedStatus: TimerStatus = 'IDLE'
+      if (parsed.status === 'PAUSED') {
+        normalizedStatus = 'PAUSED'
+      } else if (parsed.status === 'RUNNING') {
+        normalizedStatus = 'RUNNING'
+      }
+
+      setTimerState({
+        version: TIMER_STATE_VERSION,
+        session: parsed.session,
+        status: normalizedStatus,
+        durationMs,
+        remainingMs: normalizedRemaining,
+        endAt: normalizedStatus === 'RUNNING' ? normalizedEndAt : null,
+        cycleCount,
+        completionToken,
+      })
+    } catch (error) {
+      // Reset to safe state when parsing fails
+      setTimerState(prev => buildIdleState(prev.session, prev.cycleCount, timerSettings))
+    }
+  }, [timerSettings, completeSessionState])
+
+  useEffect(() => {
+    hydrateTimerFromStorage()
+  }, [hydrateTimerFromStorage])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        hydrateTimerFromStorage()
+      }
+    }
+
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => document.removeEventListener('visibilitychange', handleVisibility)
+  }, [hydrateTimerFromStorage])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      window.localStorage.setItem(TIMER_STATE_KEY, JSON.stringify(timerState))
+    } catch {
+      // ignore storage write failures
+    }
+  }, [timerState])
+
+  const startOrResumeTimer = useCallback(() => {
+    setTimerState(prev => {
+      if (prev.status === 'RUNNING') return prev
+      const now = Date.now()
+      const nextEndAt = now + prev.remainingMs
+      return {
+        ...prev,
+        status: 'RUNNING',
+        endAt: nextEndAt,
+        completionToken: generateToken(prev.session, nextEndAt),
+      }
+    })
+  }, [])
+
+  const pauseTimer = useCallback(() => {
+    setTimerState(prev => {
+      if (prev.status !== 'RUNNING' || !prev.endAt) return prev
+      const now = Date.now()
+      const remaining = Math.max(0, prev.endAt - now)
+      return {
+        ...prev,
+        status: 'PAUSED',
+        endAt: null,
+        remainingMs: remaining,
+      }
+    })
+  }, [])
+
+  const resetTimer = useCallback(() => {
+    setTimerState(prev => buildIdleState(prev.session, prev.cycleCount, timerSettings))
+    completionGuardRef.current = null
+  }, [timerSettings])
+
+  const skipTimer = useCallback(() => {
+    setTimerState(prev => {
+      const next = completeSessionState(prev, Date.now())
+      return next ?? prev
+    })
+  }, [completeSessionState])
+
+  useEffect(() => {
+    if (timerState.status !== 'RUNNING') return
+
+    const interval = window.setInterval(() => {
+      setTimerState(prev => {
+        if (prev.status !== 'RUNNING' || !prev.endAt) return prev
+        const now = Date.now()
+        const nextRemaining = Math.max(0, prev.endAt - now)
+        if (nextRemaining <= 0) {
+          const nextState = completeSessionState(prev, now)
+          return nextState ?? prev
+        }
+        if (nextRemaining === prev.remainingMs) return prev
+        return { ...prev, remainingMs: nextRemaining }
+      })
+    }, 250)
+
+    return () => window.clearInterval(interval)
+  }, [timerState.status, completeSessionState])
+
+  const timerLabel = useMemo(() => {
+    switch (timerState.session) {
+      case 'focus':
+        return 'Focus'
+      case 'shortBreak':
+        return 'Short Break'
+      case 'longBreak':
+        return 'Long Break'
+      default:
+        return 'Focus'
+    }
+  }, [timerState.session])
+
+  const progressPercent = useMemo(() => {
+    if (timerState.durationMs <= 0) return 0
+    return clamp(100 - Math.round((timerState.remainingMs / timerState.durationMs) * 100), 0, 100)
+  }, [timerState.durationMs, timerState.remainingMs])
+
+  const primaryButtonLabel = timerState.status === 'RUNNING' ? 'Pause' : 'Start'
+  const showResumeHint = timerState.status === 'PAUSED'
+  const focusSessionsRemaining = Math.max(
+    0,
+    timerSettings.sessionsBeforeLongBreak - timerState.cycleCount,
+  )
 
   return (
     <div className={rootClasses}>
-      <section
-        className={`rounded-3xl border border-slate-200 bg-white/80 dark:border-slate-700 dark:bg-slate-900/70 px-5 py-6 shadow-lg shadow-slate-400/10 ${reducedMotionAttribute}`}
-        aria-label="Pomodoro settings and shortcut list"
-      >
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-50">Settings & shortcuts</h3>
-            <span className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500 dark:text-slate-400">
-              Keyboard friendly
-            </span>
-          </div>
-          <p className="text-[0.75rem] text-slate-500 dark:text-slate-400">
-            Navigate the timer without touching your mouse and keep visual focus cues intact.
-          </p>
-        </div>
-        <div className="mt-6 grid gap-6 sm:grid-cols-2">
-          {/* Timer Settings Column */}
-          <div>
-            <h4 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2">Timer Settings</h4>
-            <fieldset className="space-y-3" aria-label="Preset timer styles" role="group">
-              <legend className="text-xs uppercase tracking-[0.3em] text-slate-400 dark:text-slate-500 mb-2">
-                Preset style
-              </legend>
-              <div className="flex flex-wrap gap-4" role="radiogroup" aria-label="Preset timer options">
-                {Object.entries(PRESET_CONFIG).map(([key, cfg]) => (
-                  <label
-                    key={key}
-                    htmlFor={`preset-${key}`}
-                    className={`flex items-center gap-2 rounded-xl border border-transparent px-3 py-2 text-sm font-semibold text-slate-700 transition-colors focus-within:border-sky-500 focus-within:ring-0 dark:text-slate-300 ${focusRingClasses}`}
-                  >
-                    <input
-                      id={`preset-${key}`}
-                      type="radio"
-                      name="preset"
-                      value={key}
-                      checked={presetKey === key}
-                      onChange={() => key !== 'custom' && handlePresetSelect(key as Exclude<PresetKey, 'custom'>)}
-                      aria-describedby={`preset-${key}-description`}
-                      className={`form-radio h-4 w-4 text-sky-500 focus-visible:outline-none ${focusRingClasses}`}
-                    />
-                    <div>
-                      <span>{cfg.label}</span>
-                      <p
-                        id={`preset-${key}-description`}
-                        className="text-xs font-normal text-slate-500 dark:text-slate-400"
-                      >
-                        {cfg.description}
-                      </p>
-                    </div>
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-            {presetKey === 'custom' && (
-              <div className="mt-4 space-y-3 text-sm text-slate-700 dark:text-slate-300">
-                <div className="flex items-center justify-between" role="group" aria-label="Custom focus duration">
-                  <label htmlFor="custom-focus" className="font-medium">
-                    Focus (min)
-                  </label>
-                  <input
-                    id="custom-focus"
-                    type="number"
-                    min={1}
-                    value={timerSettings.focus}
-                    onChange={e => handleDurationChange('focus', Number(e.target.value) || 1)}
-                    className={`w-16 text-right rounded border px-2 py-1 bg-white dark:bg-slate-800 ${focusRingClasses}`}
-                    aria-label="Adjust focus duration in minutes"
-                  />
-                </div>
-                <div className="flex items-center justify-between" role="group" aria-label="Custom short break duration">
-                  <label htmlFor="custom-short" className="font-medium">
-                    Short Break (min)
-                  </label>
-                  <input
-                    id="custom-short"
-                    type="number"
-                    min={1}
-                    value={timerSettings.shortBreak}
-                    onChange={e => handleDurationChange('shortBreak', Number(e.target.value) || 1)}
-                    className={`w-16 text-right rounded border px-2 py-1 bg-white dark:bg-slate-800 ${focusRingClasses}`}
-                    aria-label="Adjust short break duration in minutes"
-                  />
-                </div>
-                <div className="flex items-center justify-between" role="group" aria-label="Custom long break duration">
-                  <label htmlFor="custom-long" className="font-medium">
-                    Long Break (min)
-                  </label>
-                  <input
-                    id="custom-long"
-                    type="number"
-                    min={1}
-                    value={timerSettings.longBreak}
-                    onChange={e => handleDurationChange('longBreak', Number(e.target.value) || 1)}
-                    className={`w-16 text-right rounded border px-2 py-1 bg-white dark:bg-slate-800 ${focusRingClasses}`}
-                    aria-label="Adjust long break duration in minutes"
-                  />
-                </div>
+      <div className="mx-auto grid w-full max-w-6xl gap-8 lg:grid-cols-[1.15fr_0.85fr]">
+        <section
+          className={`rounded-3xl border border-slate-200 bg-white/80 p-6 shadow-lg shadow-slate-400/10 dark:border-slate-700 dark:bg-slate-900/70 ${reducedMotionAttribute}`}
+          aria-label="Pomodoro timer control"
+        >
+          <header className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+            <div>
+              <p className="text-xs uppercase tracking-[0.4em] text-slate-400 dark:text-slate-500">Current session</p>
+              <h1 className="text-3xl font-bold text-slate-900 dark:text-slate-50">
+                {timerLabel}
+              </h1>
+            </div>
+            <p className="text-sm font-semibold text-slate-600 dark:text-slate-300">
+              {focusSessionsRemaining === 0
+                ? 'Next long break is ready'
+                : `${focusSessionsRemaining} focus session${focusSessionsRemaining === 1 ? '' : 's'} until long break`}
+            </p>
+          </header>
+          <div className="mt-6 grid gap-4 md:grid-cols-[1fr_auto]">
+            <div
+              className="flex flex-col items-center justify-center rounded-2xl border border-slate-100 bg-slate-50 px-6 py-8 text-center shadow-inner shadow-slate-200/50 dark:border-slate-800 dark:bg-slate-950/50"
+              aria-live="polite"
+              aria-atomic="true"
+            >
+              <span className="text-2xl font-semibold text-slate-500 dark:text-slate-400">
+                {timerState.session === 'focus' ? 'Focus time' : 'Break time'}
+              </span>
+              <p className="mt-3 text-5xl font-bold tracking-tight text-slate-900 dark:text-slate-50">
+                {formatTime(timerState.remainingMs)}
+              </p>
+              <p className="mt-1 text-sm uppercase tracking-[0.3em] text-slate-400 dark:text-slate-500">
+                {timerState.status === 'RUNNING' ? 'Running' : timerState.status === 'PAUSED' ? 'Paused' : 'Ready'}
+              </p>
+            </div>
+            <div className="flex flex-col gap-3 rounded-2xl border border-slate-100 bg-slate-100/60 p-4 dark:border-slate-800 dark:bg-slate-900/60">
+              <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
                 <div
-                  className="flex items-center justify-between"
-                  role="group"
-                  aria-label="Custom sessions before triggering a long break"
-                >
-                  <label htmlFor="custom-sessions" className="font-medium">
-                    Sessions before long break
-                  </label>
-                  <input
-                    id="custom-sessions"
-                    type="number"
-                    min={1}
-                    value={timerSettings.sessionsBeforeLongBreak}
-                    onChange={e => handleDurationChange('sessionsBeforeLongBreak', Number(e.target.value) || 1)}
-                    className={`w-16 text-right rounded border px-2 py-1 bg-white dark:bg-slate-800 ${focusRingClasses}`}
-                    aria-label="Adjust number of focus sessions before a long break"
-                  />
-                </div>
+                  className="h-full bg-gradient-to-r from-sky-500 to-cyan-400 transition-all duration-300"
+                  style={{ width: `${progressPercent}%` }}
+                  role="progressbar"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={progressPercent}
+                />
               </div>
-            )}
-            <div className="mt-4 space-y-2 text-sm text-slate-700 dark:text-slate-300">
-              <label className={`flex items-center gap-2 ${focusRingClasses}`}>                
-                <input
-                  type="checkbox"
-                  checked={timerSettings.autoStartFocus}
-                  onChange={toggleAutoStartFocus}
-                  className={`h-5 w-5 rounded border text-sky-500 focus-visible:outline-none ${focusRingClasses}`}
-                  aria-checked={timerSettings.autoStartFocus}
-                />
-                Auto-start focus
-              </label>
-              <label className={`flex items-center gap-2 ${focusRingClasses}`}>                
-                <input
-                  type="checkbox"
-                  checked={timerSettings.autoStartBreaks}
-                  onChange={toggleAutoStartBreaks}
-                  className={`h-5 w-5 rounded border text-sky-500 focus-visible:outline-none ${focusRingClasses}`}
-                  aria-checked={timerSettings.autoStartBreaks}
-                />
-                Auto-start breaks
-              </label>
-              <label className={`flex items-center gap-2 ${focusRingClasses}`}>                
-                <input
-                  type="checkbox"
-                  checked={timerSettings.soundEnabled}
-                  onChange={toggleSound}
-                  className={`h-5 w-5 rounded border text-sky-500 focus-visible:outline-none ${focusRingClasses}`}
-                  aria-checked={timerSettings.soundEnabled}
-                />
-                Sound alerts
-              </label>
+              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500 dark:text-slate-400">
+                {progressPercent}% complete
+              </p>
+              <p className="text-sm text-slate-700 dark:text-slate-300">
+                {timerState.status === 'PAUSED' ? 'Resume the clock to continue.' : 'Keep focus and stay present.'}
+              </p>
             </div>
           </div>
-          {/* Shortcut Hints Column */}
-          <div className="flex flex-col gap-3">
-            {shortcutHints.map(hint => (
-              <article
-                key={hint.shortcut}
-                className="flex flex-col gap-1 rounded-2xl border border-slate-100 bg-slate-50/90 px-4 py-3 text-slate-900 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-50"
-                role="region"
-                aria-label={`Shortcut hint for ${hint.shortcut}`}
-              >
-                <span className="text-xs uppercase tracking-[0.3em] text-slate-400 dark:text-slate-500">
-                  {hint.shortcut}
-                </span>
-                <p className="text-sm font-semibold">{hint.description}</p>
-              </article>
-            ))}
+          <div className="mt-6 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={timerState.status === 'RUNNING' ? pauseTimer : startOrResumeTimer}
+              className={`rounded-full bg-slate-900 px-6 py-3 text-sm font-semibold text-white shadow-lg transition ${focusRingClasses} ${timerState.status === 'RUNNING' ? 'hover:bg-slate-800 dark:hover:bg-slate-700' : 'hover:bg-slate-800 dark:hover:bg-slate-700'}`}
+              aria-label={primaryButtonLabel}
+            >
+              {primaryButtonLabel}
+              {showResumeHint && <span className="ml-2 text-[0.65rem] font-normal uppercase tracking-[0.3em]">Resume</span>}
+            </button>
+            <button
+              type="button"
+              onClick={resetTimer}
+              className={`rounded-full border border-slate-200 px-5 py-3 text-sm font-semibold text-slate-600 transition ${focusRingClasses} hover:border-slate-300 hover:text-slate-900 dark:border-slate-700 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:text-slate-50`}
+            >
+              Reset
+            </button>
+            <button
+              type="button"
+              onClick={skipTimer}
+              className={`rounded-full border border-transparent px-5 py-3 text-sm font-semibold text-slate-600 transition ${focusRingClasses} hover:border-slate-200 hover:bg-slate-100 dark:hover:border-slate-700 dark:hover:bg-slate-900/40`}
+            >
+              Skip
+            </button>
           </div>
-        </div>
-      </section>
+        </section>
+
+        <section
+          className={`rounded-3xl border border-slate-200 bg-white/80 px-5 py-6 shadow-lg shadow-slate-400/10 dark:border-slate-700 dark:bg-slate-900/70 ${reducedMotionAttribute}`}
+          aria-label="Pomodoro settings and shortcut list"
+        >
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-50">Settings & shortcuts</h3>
+              <span className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500 dark:text-slate-400">
+                Keyboard friendly
+              </span>
+            </div>
+            <p className="text-[0.75rem] text-slate-500 dark:text-slate-400">
+              Navigate the timer without touching your mouse and keep visual focus cues intact.
+            </p>
+          </div>
+          <div className="mt-6 grid gap-6 sm:grid-cols-2">
+            <div>
+              <h4 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2">Timer Settings</h4>
+              <fieldset className="space-y-3" aria-label="Preset timer styles" role="group">
+                <legend className="text-xs uppercase tracking-[0.3em] text-slate-400 dark:text-slate-500 mb-2">
+                  Preset style
+                </legend>
+                <div className="flex flex-wrap gap-4" role="radiogroup" aria-label="Preset timer options">
+                  {Object.entries(PRESET_CONFIG).map(([key, cfg]) => (
+                    <label
+                      key={key}
+                      htmlFor={`preset-${key}`}
+                      className={`flex items-center gap-2 rounded-xl border border-transparent px-3 py-2 text-sm font-semibold text-slate-700 transition-colors focus-within:border-sky-500 focus-within:ring-0 dark:text-slate-300 ${focusRingClasses}`}
+                    >
+                      <input
+                        id={`preset-${key}`}
+                        type="radio"
+                        name="preset"
+                        value={key}
+                        checked={presetKey === key}
+                        onChange={() => key !== 'custom' && handlePresetSelect(key as Exclude<PresetKey, 'custom'>)}
+                        aria-describedby={`preset-${key}-description`}
+                        className={`form-radio h-4 w-4 text-sky-500 focus-visible:outline-none ${focusRingClasses}`}
+                      />
+                      <div>
+                        <span>{cfg.label}</span>
+                        <p
+                          id={`preset-${key}-description`}
+                          className="text-xs font-normal text-slate-500 dark:text-slate-400"
+                        >
+                          {cfg.description}
+                        </p>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+              {presetKey === 'custom' && (
+                <div className="mt-4 space-y-3 text-sm text-slate-700 dark:text-slate-300">
+                  <div className="flex items-center justify-between" role="group" aria-label="Custom focus duration">
+                    <label htmlFor="custom-focus" className="font-medium">
+                      Focus (min)
+                    </label>
+                    <input
+                      id="custom-focus"
+                      type="number"
+                      min={1}
+                      value={timerSettings.focus}
+                      onChange={e => handleDurationChange('focus', Number(e.target.value) || 1)}
+                      className={`w-16 text-right rounded border px-2 py-1 bg-white dark:bg-slate-800 ${focusRingClasses}`}
+                      aria-label="Adjust focus duration in minutes"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between" role="group" aria-label="Custom short break duration">
+                    <label htmlFor="custom-short" className="font-medium">
+                      Short Break (min)
+                    </label>
+                    <input
+                      id="custom-short"
+                      type="number"
+                      min={1}
+                      value={timerSettings.shortBreak}
+                      onChange={e => handleDurationChange('shortBreak', Number(e.target.value) || 1)}
+                      className={`w-16 text-right rounded border px-2 py-1 bg-white dark:bg-slate-800 ${focusRingClasses}`}
+                      aria-label="Adjust short break duration in minutes"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between" role="group" aria-label="Custom long break duration">
+                    <label htmlFor="custom-long" className="font-medium">
+                      Long Break (min)
+                    </label>
+                    <input
+                      id="custom-long"
+                      type="number"
+                      min={1}
+                      value={timerSettings.longBreak}
+                      onChange={e => handleDurationChange('longBreak', Number(e.target.value) || 1)}
+                      className={`w-16 text-right rounded border px-2 py-1 bg-white dark:bg-slate-800 ${focusRingClasses}`}
+                      aria-label="Adjust long break duration in minutes"
+                    />
+                  </div>
+                  <div
+                    className="flex items-center justify-between"
+                    role="group"
+                    aria-label="Custom sessions before triggering a long break"
+                  >
+                    <label htmlFor="custom-sessions" className="font-medium">
+                      Sessions before long break
+                    </label>
+                    <input
+                      id="custom-sessions"
+                      type="number"
+                      min={1}
+                      value={timerSettings.sessionsBeforeLongBreak}
+                      onChange={e => handleDurationChange('sessionsBeforeLongBreak', Number(e.target.value) || 1)}
+                      className={`w-16 text-right rounded border px-2 py-1 bg-white dark:bg-slate-800 ${focusRingClasses}`}
+                      aria-label="Adjust number of focus sessions before a long break"
+                    />
+                  </div>
+                </div>
+              )}
+              <div className="mt-4 space-y-2 text-sm text-slate-700 dark:text-slate-300">
+                <label className={`flex items-center gap-2 ${focusRingClasses}`}>
+                  <input
+                    type="checkbox"
+                    checked={timerSettings.autoStartFocus}
+                    onChange={toggleAutoStartFocus}
+                    className={`h-5 w-5 rounded border text-sky-500 focus-visible:outline-none ${focusRingClasses}`}
+                    aria-checked={timerSettings.autoStartFocus}
+                  />
+                  Auto-start focus
+                </label>
+                <label className={`flex items-center gap-2 ${focusRingClasses}`}>
+                  <input
+                    type="checkbox"
+                    checked={timerSettings.autoStartBreaks}
+                    onChange={toggleAutoStartBreaks}
+                    className={`h-5 w-5 rounded border text-sky-500 focus-visible:outline-none ${focusRingClasses}`}
+                    aria-checked={timerSettings.autoStartBreaks}
+                  />
+                  Auto-start breaks
+                </label>
+                <label className={`flex items-center gap-2 ${focusRingClasses}`}>
+                  <input
+                    type="checkbox"
+                    checked={timerSettings.soundEnabled}
+                    onChange={toggleSound}
+                    className={`h-5 w-5 rounded border text-sky-500 focus-visible:outline-none ${focusRingClasses}`}
+                    aria-checked={timerSettings.soundEnabled}
+                  />
+                  Sound alerts
+                </label>
+              </div>
+            </div>
+            <div className="flex flex-col gap-3">
+              {shortcutHints.map(hint => (
+                <article
+                  key={hint.shortcut}
+                  className="flex flex-col gap-1 rounded-2xl border border-slate-100 bg-slate-50/90 px-4 py-3 text-slate-900 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-50"
+                  role="region"
+                  aria-label={`Shortcut hint for ${hint.shortcut}`}
+                >
+                  <span className="text-xs uppercase tracking-[0.3em] text-slate-400 dark:text-slate-500">
+                    {hint.shortcut}
+                  </span>
+                  <p className="text-sm font-semibold">{hint.description}</p>
+                </article>
+              ))}
+            </div>
+          </div>
+        </section>
+      </div>
     </div>
   )
 }
