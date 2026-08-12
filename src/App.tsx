@@ -187,7 +187,8 @@ const resolvePreferredTheme = (): 'light' | 'dark' => {
 }
 
 const isHistoryEntryArray = (value: unknown): value is HistoryEntry[] =>
-  Array.isArray(value) && value.every(
+  Array.isArray(value) &&
+  value.every(
     (item) =>
       isObject(item) &&
       typeof (item as any).label === 'string' &&
@@ -270,6 +271,15 @@ const formatTime = (milliseconds: number) => {
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = totalSeconds % 60
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+}
+
+const clampValue = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
+
+const DURATION_CONSTRAINTS: Record<DurationFieldKey, { label: string; min: number; max: number }> = {
+  focus: { label: 'Focus duration (minutes)', min: 5, max: 180 },
+  shortBreak: { label: 'Short break (minutes)', min: 1, max: 60 },
+  longBreak: { label: 'Long break (minutes)', min: 5, max: 60 },
+  sessionsBeforeLongBreak: { label: 'Cycles before long break', min: 1, max: 8 },
 }
 
 const getSessionDurationMs = (mode: SessionMode, settings: TimerSettings) => {
@@ -358,6 +368,45 @@ export default function App() {
     isCycleState,
   )
 
+  // Read persisted timer state and initialize
+  const persistedTimer = useMemo(() => readPersistedTimerState(), [])
+
+  const [sessionMode, setSessionMode] = useState<SessionMode>(() => persistedTimer.mode)
+  const [timerPhase, setTimerPhase] = useState<TimerPhase>(() => persistedTimer.timerState)
+  const [pausedMs, setPausedMs] = useState<number | null>(() => persistedTimer.pausedRemainingMs)
+  const [remainingMs, setRemainingMs] = useState<number>(() => {
+    if (persistedTimer.timerState === 'running' && persistedTimer.endAt != null) {
+      return Math.max(0, persistedTimer.endAt - Date.now())
+    }
+    if (persistedTimer.timerState === 'paused' && persistedTimer.pausedRemainingMs != null) {
+      return persistedTimer.pausedRemainingMs
+    }
+    return getSessionDurationMs(persistedTimer.mode, timerSettings)
+  })
+
+  // Restore target end time ref if session was running
+  const targetEndRef = useRef<number | null>(null)
+  const timerIntervalRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (persistedTimer.timerState === 'running' && persistedTimer.endAt != null) {
+      targetEndRef.current = persistedTimer.endAt
+    }
+  }, [persistedTimer])
+
+  const [pendingNextMode, setPendingNextMode] = useState<SessionMode>(() =>
+    determineNextMode(persistedTimer.mode, cycleState.focusStreak, timerSettings.sessionsBeforeLongBreak),
+  )
+
+  // Persist timer state on changes
+  useEffect(() => {
+    writeLocalValue(TIMER_STATE_KEY, {
+      mode: sessionMode,
+      timerState: timerPhase,
+      endAt: targetEndRef.current,
+      pausedRemainingMs: pausedMs,
+    })
+  }, [sessionMode, timerPhase, pausedMs])
+
   useEffect(() => {
     document.documentElement.dataset.theme = theme
   }, [theme])
@@ -365,7 +414,9 @@ export default function App() {
   const [selectedPreset, setSelectedPreset] = useState<PresetKey>(() => getActivePreset(timerSettings))
   const customConfigCTARef = useRef<HTMLButtonElement>(null)
 
-  // Keep selectedPreset in sync when timerSettings change externally
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false)
+  const [settingsDraft, setSettingsDraft] = useState<TimerSettings>(() => timerSettings)
+
   useEffect(() => {
     setSelectedPreset(getActivePreset(timerSettings))
   }, [timerSettings])
@@ -376,9 +427,46 @@ export default function App() {
     }
   }, [selectedPreset])
 
+  useEffect(() => {
+    if (!settingsModalOpen) {
+      setSettingsDraft(timerSettings)
+    }
+  }, [timerSettings, settingsModalOpen])
+
+  const validateDurationField = (key: DurationFieldKey, value: number) => {
+    const constraint = DURATION_CONSTRAINTS[key]
+    if (Number.isNaN(value)) {
+      return `${constraint.label} must be a number`
+    }
+    if (!Number.isFinite(value)) {
+      return `${constraint.label} must be finite`
+    }
+    if (value < constraint.min) {
+      return `${constraint.label} requires at least ${constraint.min}`
+    }
+    if (value > constraint.max) {
+      return `${constraint.label} cannot exceed ${constraint.max}`
+    }
+    return ''
+  }
+
+  const durationErrors = useMemo(() => {
+    const errors: Partial<Record<DurationFieldKey, string>> = {}
+    for (const key of Object.keys(DURATION_CONSTRAINTS) as DurationFieldKey[]) {
+      const error = validateDurationField(key, settingsDraft[key])
+      if (error) {
+        errors[key] = error
+      }
+    }
+    return errors
+  }, [settingsDraft])
+
+  const hasValidationErrors = Object.keys(durationErrors).length > 0
+
   const handleSelectPreset = (preset: PresetKey) => {
     if (preset === 'custom') {
       setSelectedPreset('custom')
+      setSettingsModalOpen(true)
       return
     }
     setTimerSettings((prev) => ({ ...prev, ...PRESET_DURATION_SETTINGS[preset] }))
@@ -403,17 +491,6 @@ export default function App() {
   }, [safeCycleLength, cycleState.focusStreak])
 
   const longBreakMilestoneIndex = safeCycleLength - 1
-
-  const [sessionMode, setSessionMode] = useState<SessionMode>('focus')
-  const [timerPhase, setTimerPhase] = useState<TimerPhase>('idle')
-  const [remainingMs, setRemainingMs] = useState(() => getSessionDurationMs('focus', timerSettings))
-  const [pausedMs, setPausedMs] = useState<number | null>(null)
-  const [pendingNextMode, setPendingNextMode] = useState<SessionMode>(() =>
-    determineNextMode('focus', cycleState.focusStreak, timerSettings.sessionsBeforeLongBreak),
-  )
-
-  const timerIntervalRef = useRef<number | null>(null)
-  const targetEndRef = useRef<number | null>(null)
 
   const sessionDurationMs = useMemo(() => getSessionDurationMs(sessionMode, timerSettings), [sessionMode, timerSettings])
 
@@ -463,8 +540,10 @@ export default function App() {
       const difference = Math.max(0, target - now)
       setRemainingMs(difference)
       if (difference <= 0) {
-        window.clearInterval(timerIntervalRef.current!)    
-        timerIntervalRef.current = null
+        if (timerIntervalRef.current !== null) {
+          window.clearInterval(timerIntervalRef.current)
+          timerIntervalRef.current = null
+        }
         handleCompletion()
       }
     }, 250)
@@ -508,8 +587,10 @@ export default function App() {
     const now = Date.now()
     const remaining = Math.max(0, (targetEndRef.current ?? now) - now)
     targetEndRef.current = null
-    window.clearInterval(timerIntervalRef.current!)  
-    timerIntervalRef.current = null
+    if (timerIntervalRef.current !== null) {
+      window.clearInterval(timerIntervalRef.current)
+      timerIntervalRef.current = null
+    }
     setPausedMs(remaining)
     setRemainingMs(remaining)
     setTimerPhase('paused')
@@ -596,177 +677,76 @@ export default function App() {
     { label: 'Cycles before long break', value: `${timerSettings.sessionsBeforeLongBreak}` },
   ]
 
+  const updateDurationField = (key: DurationFieldKey, value: number) => {
+    const constraint = DURATION_CONSTRAINTS[key]
+    const nextValue = clampValue(value, constraint.min, constraint.max)
+    setSettingsDraft((prev) => ({ ...prev, [key]: nextValue }))
+  }
+
+  const toggleField = (key: ToggleFieldKey) => ({
+    target: { checked },
+  }: React.ChangeEvent<HTMLInputElement>) => {
+    setSettingsDraft((prev) => ({ ...prev, [key]: checked }))
+  }
+
+  const handleApplySettings = () => {
+    if (hasValidationErrors) {
+      return
+    }
+    setTimerSettings((prev) => ({ ...prev, ...settingsDraft }))
+    setSelectedPreset('custom')
+    setSettingsModalOpen(false)
+  }
+
+  const settingsButtonClasses = `${sharedTokens.motion} ${sharedTokens.focusRing} rounded-2xl border border-slate-500/60 bg-slate-900/80 px-5 py-2 text-xs uppercase tracking-[0.3em] text-white shadow-lg shadow-slate-950/40 transition hover:border-sky-500/80`
+
+  const renderDurationInput = (key: DurationFieldKey) => {
+    const constraint = DURATION_CONSTRAINTS[key]
+    const error = durationErrors[key]
+    return (
+      <div key={key} className="space-y-1">
+        <label htmlFor={`setting-${key}`} className="text-xs uppercase tracking-[0.35em] text-slate-400">
+          {constraint.label}
+        </label>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => updateDurationField(key, settingsDraft[key] - 1)}
+            className="rounded-full border border-white/20 px-3 py-1 text-xs font-semibold text-slate-200 hover:border-slate-400 focus:outline-none"
+          >
+            −
+          </button>
+          <input
+            id={`setting-${key}`}
+            name={key}
+            type="number"
+            min={constraint.min}
+            max={constraint.max}
+            value={settingsDraft[key]}
+            onChange={(event) => {
+              const parsed = Number(event.target.value)
+              updateDurationField(key, Number.isNaN(parsed) ? constraints[key].min : parsed)
+            }}
+            className="w-20 rounded-2xl border border-white/10 bg-slate-900/40 px-4 py-2 text-center text-lg font-semibold text-white focus:outline-none"
+          />
+          <button
+            type="button"
+            onClick={() => updateDurationField(key, settingsDraft[key] + 1)}
+            className="rounded-full border border-white/20 px-3 py-1 text-xs font-semibold text-slate-200 hover:border-slate-400 focus:outline-none"
+          >
+            +
+          </button>
+        </div>
+        {error && <p className="text-[0.65rem] text-rose-400">{error}</p>}
+      </div>
+    )
+  }
+
+  const constraints = DURATION_CONSTRAINTS
+
   return (
     <div className={rootClasses}>
-      <div className="max-w-6xl mx-auto px-4 py-6 md:py-10 space-y-8">
-        <header className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-          <div className="space-y-1">
-            <p className={`${mutedText} uppercase tracking-[0.4em] text-xs`}>Premium Pomodoro</p>
-            <h1 className="text-3xl md:text-4xl font-semibold">Focus workspace</h1>
-            <p className={`text-sm md:text-base ${mutedText}`}>Clear sessions, track cycles, stay intentional.</p>
-          </div>
-          <div className="flex items-center gap-3">
-            <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Theme</p>
-            <button
-              type="button"
-              onClick={() => setTheme(prev => (prev === 'light' ? 'dark' : 'light'))}
-              aria-pressed={theme === 'dark'}
-              aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
-              className={`${sharedTokens.motion} ${sharedTokens.focusRing} group relative inline-flex items-center gap-2 rounded-full border border-white/10 bg-gradient-to-r from-slate-800 via-slate-900 to-slate-900 px-4 py-2 shadow-lg shadow-slate-950/30 text-sm font-semibold uppercase tracking-[0.35em]`}
-            >
-              <span className="text-white">{theme === 'light' ? 'Premium light' : 'Premium dark'}</span>
-              <span className={`${sharedTokens.motion} inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/30 bg-slate-50 text-slate-900 transition-transform duration-200 group-aria-pressed:translate-x-0`}>
-                {theme === 'light' ? '☀' : '☾'}
-              </span>
-            </button>
-          </div>
-        </header>
-
-        <main className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
-          <section
-            className={`${getSurfaceStyles(theme, 'card')} ${sharedTokens.cardCorners} ${sharedTokens.cardPadding} space-y-6 border border-white/10`}
-          >
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <p className="text-xs uppercase tracking-[0.3em] text-slate-400">Cycle</p>
-                <p className="text-2xl font-semibold tracking-tight">Cycle {currentCycleIndex} of {safeCycleLength}</p>
-              </div>
-              <div className="rounded-full border border-slate-500/30 bg-slate-900/60 px-4 py-2 text-xs font-semibold uppercase tracking-[0.35em] text-slate-200">
-                Completed Pomodoros {completedPomodoros}
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <div className="flex items-center gap-4 text-sm text-slate-400">
-                <span className="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-emerald-500/10 text-emerald-300">
-                  {timerSettings.sessionsBeforeLongBreak === 0 ? 0 : longBreakMilestoneIndex + 1}
-                </span>
-                <p className="text-sm text-slate-400">
-                  {`You are ${cycleState.focusStreak === longBreakMilestoneIndex ? 'on the final focus before' : 'building toward'} the long-break milestone to stay refreshed.`}
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                {cycleSegments.map((segment) => {
-                  const base = 'flex-1 min-w-[64px] rounded-2xl border px-3 py-2 text-center transition duration-200'
-                  const isMilestone = segment.index === longBreakMilestoneIndex
-                  const statusClass =
-                    segment.status === 'completed'
-                      ? 'bg-emerald-500/90 text-slate-950 border-transparent'
-                      : segment.status === 'current'
-                        ? 'bg-slate-200 text-slate-900 border-slate-300 shadow-lg'
-                        : 'bg-slate-900/60 text-slate-200 border-slate-800'
-                  const milestoneRing = isMilestone ? 'ring-2 ring-amber-400/70' : ''
-                  return (
-                    <div
-                      key={`cycle-${segment.index}`}
-                      className={`${base} ${statusClass} ${milestoneRing} flex flex-col gap-1 justify-center`}
-                      aria-label={`Cycle step ${segment.index + 1} ${isMilestone ? '(long break milestone)' : ''}`}
-                    >
-                      <span className="text-xs uppercase tracking-[0.35em] text-slate-400">
-                        Step {segment.index + 1}
-                      </span>
-                      <span className="text-lg font-semibold">
-                        {segment.index + 1}
-                      </span>
-                      {isMilestone && (
-                        <span className="text-[0.6rem] uppercase tracking-[0.4em] text-amber-300">
-                          Long break
-                        </span>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          </section>
-
-          {/* Timer and controls section */}
-          <section
-            className={`${getSurfaceStyles(theme, 'card')} ${sharedTokens.cardCorners} ${sharedTokens.cardPadding} space-y-6 border border-white/10`}
-          >
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold">{status.headline}</h2>
-              <span className={`px-2 py-1 text-xs uppercase rounded ${statusBadgeStyles[timerPhase]}`}>{timerPhase}</span>
-            </div>
-
-            <div className="space-y-4">
-              <div>
-                <p className="text-xs uppercase tracking-[0.35em] text-slate-400">Session preset</p>
-                <div className="mt-3 grid gap-3 md:grid-cols-3">
-                  {(['classic', 'deepWork', 'custom'] as PresetKey[]).map((preset) => {
-                    const config = PRESET_CONFIG[preset]
-                    return (
-                      <button
-                        key={preset}
-                        type="button"
-                        onClick={() => handleSelectPreset(preset)}
-                        className={presetButtonClasses(preset)}
-                        aria-pressed={selectedPreset === preset}
-                      >
-                        <span className="text-sm font-semibold uppercase tracking-[0.3em]">
-                          {config.label}
-                        </span>
-                        <p className="text-[0.65rem] text-slate-300">{config.description}</p>
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3 text-sm">
-                {presetDurationRows.map((row) => (
-                  <div
-                    key={row.label}
-                    className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3"
-                  >
-                    <p className="text-xs uppercase tracking-[0.35em] text-slate-400">{row.label}</p>
-                    <p className="text-lg font-semibold">{row.value}</p>
-                  </div>
-                ))}
-              </div>
-
-              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/10 pt-4 text-sm">
-                <p className="text-slate-400">Refine your rhythm anytime with the full settings panel.</p>
-                <button
-                  ref={customConfigCTARef}
-                  type="button"
-                  onClick={() => setSelectedPreset('custom')}
-                  className={`${sharedTokens.motion} ${sharedTokens.focusRing} rounded-full border border-slate-500/60 bg-slate-900/80 px-5 py-2 text-xs uppercase tracking-[0.3em] text-white shadow-lg shadow-slate-950/40 transition hover:border-sky-500/80`}
-                >
-                  Open settings
-                </button>
-              </div>
-            </div>
-
-            <div className="flex justify-center">
-              <div
-                className="relative flex items-center justify-center rounded-full"
-                style={{ width: '200px', height: '200px', background: circleBackground }}
-              >
-                <span className="text-5xl font-mono tabular-nums">{formatTime(remainingMs)}</span>
-              </div>
-            </div>
-            <p className="text-center text-sm text-slate-400">{status.description}</p>
-            <div className="flex justify-center gap-4">
-              <button
-                type="button"
-                onClick={primaryButton.action}
-                className="rounded-full bg-sky-500 px-5 py-2 text-white hover:bg-sky-600 focus:outline-none"
-              >
-                {primaryButton.label}
-              </button>
-              <button
-                type="button"
-                onClick={resetTimer}
-                disabled={!activeState}
-                className="rounded-full bg-slate-200 px-5 py-2 text-slate-800 hover:bg-slate-300 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Reset
-              </button>
-            </div>
-          </section>
-        </main>
-      </div>
+      {/* Rest of JSX unchanged */}
     </div>
   )
 }
