@@ -1,5 +1,6 @@
 import {
   Dispatch,
+  FormEvent,
   SetStateAction,
   useCallback,
   useEffect,
@@ -13,6 +14,7 @@ const TIMER_SETTINGS_KEY = 'pomodoro_timer_settings'
 const HISTORY_KEY = 'pomodoro_history'
 const TIMER_STATE_KEY = 'pomodoro_timer_state'
 const CYCLE_STATE_KEY = 'pomodoro_cycle_state'
+const CURRENT_TASK_KEY = 'pomodoro_current_task'
 
 const notificationApiAvailable = () => typeof window !== 'undefined' && 'Notification' in window
 
@@ -129,7 +131,6 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 const isTheme = (value: unknown): value is 'light' | 'dark' =>
   value === 'light' || value === 'dark'
 
-// Strongly validate that loaded settings match the TimerSettings shape
 const isTimerSettings = (value: unknown): value is TimerSettings =>
   isObject(value) &&
   typeof (value as any).focus === 'number' &&
@@ -140,7 +141,6 @@ const isTimerSettings = (value: unknown): value is TimerSettings =>
   typeof (value as any).autoStartBreaks === 'boolean' &&
   typeof (value as any).soundEnabled === 'boolean'
 
-// Validators for history and cycle state
 const isHistoryEntry = (value: unknown): value is HistoryEntry =>
   isObject(value) &&
   typeof (value as any).label === 'string' &&
@@ -154,6 +154,8 @@ const isCycleState = (value: unknown): value is CycleState =>
   isObject(value) &&
   typeof (value as any).focusStreak === 'number' &&
   typeof (value as any).completedFocusSessions === 'number'
+
+const isTaskTitle = (value: unknown): value is string => typeof value === 'string'
 
 const readLocalValue = <T,>(
   key: string,
@@ -305,6 +307,18 @@ export default function App() {
     isTimerSettings,
   )
 
+  const [currentTask, setCurrentTask] = usePersistedState<string>(
+    CURRENT_TASK_KEY,
+    () => '',
+    isTaskTitle,
+  )
+
+  const [taskInput, setTaskInput] = useState<string>('')
+
+  useEffect(() => {
+    setTaskInput(currentTask)
+  }, [currentTask])
+
   const persistedTimer = useMemo(() => readPersistedTimerState(), [])
 
   const [sessionMode, setSessionMode] = useState<SessionMode>(() => persistedTimer.mode)
@@ -323,7 +337,6 @@ export default function App() {
   const [prefersReducedMotion, setPrefersReducedMotion] = useState(false)
   const [completedMode, setCompletedMode] = useState<SessionMode | null>(null)
 
-  // Persisted history and cycle state
   const [history, setHistory] = usePersistedState<HistoryEntry[]>(
     HISTORY_KEY,
     () => DEFAULT_HISTORY_ENTRIES,
@@ -335,7 +348,6 @@ export default function App() {
     isCycleState,
   )
 
-  // Calculate nextMode dynamically to avoid staleness
   const nextMode = useMemo(
     () =>
       determineNextMode(
@@ -454,13 +466,11 @@ export default function App() {
         setRemainingMs(0)
         targetEndRef.current = null
 
-        // record history entry
         setHistory(prev => [
           ...prev,
           { label: sessionLabels[sessionMode], time: new Date().toISOString(), type: sessionMode },
         ])
 
-        // update cycle state
         setCycleState(prev => {
           if (sessionMode === 'focus') {
             const newStreak = prev.focusStreak + 1
@@ -537,15 +547,20 @@ export default function App() {
   }
 
   const handleContinueToNextSession = useCallback(() => {
-    const sessionDuration = getSessionDurationMs(nextMode, timerSettings)
+    const upcoming = determineNextMode(
+      sessionMode,
+      cycleState.focusStreak,
+      timerSettings.sessionsBeforeLongBreak,
+    )
+    const sessionDuration = getSessionDurationMs(upcoming, timerSettings)
     const endAt = Date.now() + Math.max(0, sessionDuration)
     targetEndRef.current = endAt
-    setSessionMode(nextMode)
+    setSessionMode(upcoming)
     setRemainingMs(sessionDuration)
     setPausedMs(null)
     setCompletedMode(null)
     setTimerPhase('running')
-  }, [nextMode, timerSettings])
+  }, [sessionMode, cycleState.focusStreak, timerSettings])
 
   const primaryButton = useMemo(() => {
     switch (timerPhase) {
@@ -593,6 +608,24 @@ export default function App() {
 
   const rootClasses = `${getSurfaceStyles(theme)} min-h-screen flex flex-col ${sharedTokens.motion}`
 
+  const handleTaskSubmit = useCallback(
+    (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault()
+      const trimmed = taskInput.trim()
+      if (!trimmed) {
+        setCurrentTask('')
+        return
+      }
+      setCurrentTask(trimmed)
+    },
+    [setCurrentTask, taskInput],
+  )
+
+  const handleClearTask = useCallback(() => {
+    setCurrentTask('')
+    setTaskInput('')
+  }, [setCurrentTask])
+
   return (
     <div className={rootClasses}>
       <header className="p-4 flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center">
@@ -618,47 +651,105 @@ export default function App() {
           Switch to {theme === 'light' ? 'Dark' : 'Light'}
         </button>
       </header>
-      <main className="flex flex-1 flex-col items-center justify-center">
-        <h2 className="text-2xl font-semibold mb-4">{timerLabel} Session</h2>
-        <div className="text-6xl font-mono mb-6">{formatTime(remainingMs)}</div>
-        <div
-          className={`
-            ${completionPanelMotionClass}
-            ${completionPanelVisible ? 'opacity-100 translate-y-0 pointer-events-auto' : 'opacity-0 translate-y-2 pointer-events-none'}
-            relative w-full max-w-md rounded-2xl border border-white/40 bg-white/90 dark:bg-slate-900/80 dark:border-slate-700/80 p-6 mb-6 flex flex-col gap-3 shadow-lg
-          `}
-          aria-live="polite"
-          role="status"
-        >
-          <p className="text-xs uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
-            Session complete
-          </p>
-          <p className="text-lg font-semibold text-slate-900 dark:text-slate-50">
-            {completionLabel} session finished!
-          </p>
-          <p className="text-sm text-slate-600 dark:text-slate-300">
-            Ready for the next chapter? {upcomingLabel} is standing by to keep you in flow.
-          </p>
-          <button
-            type="button"
-            onClick={handleContinueToNextSession}
-            className="mt-2 px-4 py-2 bg-emerald-600 text-white rounded-full text-sm font-semibold shadow-lg shadow-emerald-400/30"
-          >
-            Start {upcomingLabel}
-          </button>
+      <main className="flex flex-1 flex-col items-center justify-center px-4 py-6">
+        <div className="w-full max-w-3xl flex flex-col gap-6">
+          <section className="rounded-3xl border border-slate-200 bg-white/80 dark:border-slate-700 dark:bg-slate-900/70 px-5 py-4 shadow-lg shadow-slate-400/10">
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Current task</h3>
+                {currentTask ? (
+                  <button
+                    type="button"
+                    onClick={handleClearTask}
+                    className={`text-sm font-semibold text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 ${sharedTokens.focusRing}`}
+                  >
+                    Clear
+                  </button>
+                ) : null}
+              </div>
+              <p className="text-xs uppercase tracking-[0.3em] text-slate-400 dark:text-slate-500">
+                Keep your work session anchored
+              </p>
+            </div>
+            <div className="mt-3 flex flex-col gap-3">
+              <form onSubmit={handleTaskSubmit} className="flex items-center gap-2">
+                <label htmlFor="task-input" className="sr-only">
+                  Enter current task
+                </label>
+                <input
+                  id="task-input"
+                  type="text"
+                  value={taskInput}
+                  onChange={event => setTaskInput(event.target.value)}
+                  placeholder="Describe what you're working on"
+                  className={`flex-1 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-sky-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:placeholder:text-slate-500 ${sharedTokens.focusRing}`}
+                />
+                <button
+                  type="submit"
+                  className="rounded-2xl bg-sky-600 px-4 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-white shadow-lg shadow-sky-500/40 hover:bg-sky-500 focus-visible:outline-none"
+                >
+                  Save
+                </button>
+              </form>
+              <div
+                className="rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-200"
+                aria-live="polite"
+              >
+                {currentTask ? (
+                  <span className="font-medium text-slate-900 dark:text-slate-50">
+                    {currentTask}
+                  </span>
+                ) : (
+                  <span className="text-slate-500 dark:text-slate-400">
+                    No task yet — jot down what you want to stay focused on, then start the timer.
+                  </span>
+                )}
+              </div>
+            </div>
+          </section>
+          <section className="flex flex-col items-center gap-4">
+            <h2 className="text-2xl font-semibold">{timerLabel} Session</h2>
+            <div className="text-6xl font-mono">{formatTime(remainingMs)}</div>
+            <div
+              className={`
+                ${completionPanelMotionClass}
+                ${completionPanelVisible ? 'opacity-100 translate-y-0 pointer-events-auto' : 'opacity-0 translate-y-2 pointer-events-none'}
+                relative w-full max-w-md rounded-2xl border border-white/40 bg-white/90 dark:bg-slate-900/80 dark;border-slate-700/80 p-6 flex flex-col gap-3 shadow-lg
+              `}
+              aria-live="polite"
+              role="status"
+            >
+              <p className="text-xs uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+                Session complete
+              </p>
+              <p className="text-lg font-semibold text-slate-900 dark:text-slate-50">
+                {completionLabel} session finished!
+              </p>
+              <p className="text-sm text-slate-600 dark:text-slate-300">
+                Ready for the next chapter? {upcomingLabel} is standing by to keep you in flow.
+              </p>
+              <button
+                type="button"
+                onClick={handleContinueToNextSession}
+                className="mt-2 px-4 py-2 bg-emerald-600 text-white rounded-full text-sm font-semibold shadow-lg shadow-emerald-400/30"
+              >
+                Start {upcomingLabel}
+              </button>
+            </div>
+            <button
+              onClick={primaryButton.action}
+              disabled={timerPhase === 'completed'}
+              className={`
+                px-6 py-3 rounded-full text-white ${
+                  timerPhase === 'running' ? 'bg-amber-500' : 'bg-green-500'
+                }
+                ${timerPhase === 'completed' ? 'opacity-50 cursor-not-allowed' : ''}
+              `}
+            >
+              {primaryButton.label}
+            </button>
+          </section>
         </div>
-        <button
-          onClick={primaryButton.action}
-          disabled={timerPhase === 'completed'}
-          className={`
-            px-6 py-3 rounded-full text-white ${
-              timerPhase === 'running' ? 'bg-amber-500' : 'bg-green-500'
-            }
-            ${timerPhase === 'completed' ? 'opacity-50 cursor-not-allowed' : ''}
-          `}
-        >
-          {primaryButton.label}
-        </button>
       </main>
     </div>
   )
