@@ -77,6 +77,16 @@ type SafeAudioPlayer = {
 const TIMER_SESSIONS: TimerSession[] = ['focus', 'shortBreak', 'longBreak']
 const TIMER_STATUSES: TimerStatus[] = ['IDLE', 'RUNNING', 'PAUSED']
 
+const TEXTUAL_INPUT_TYPES = new Set([
+  'text',
+  'search',
+  'email',
+  'url',
+  'tel',
+  'password',
+  'number',
+])
+
 const isTimerSession = (value: unknown): value is TimerSession =>
   typeof value === 'string' && TIMER_SESSIONS.includes(value as TimerSession)
 
@@ -180,6 +190,16 @@ const isTimerSettings: StorageValidator<TimerSettings> = (value): value is Timer
     typeof candidate.autoStartBreaks === 'boolean' &&
     typeof candidate.soundEnabled === 'boolean'
   )
+}
+
+const isTypingElement = (target: EventTarget | null) => {
+  if (!(target instanceof Element)) return false
+  if (target instanceof HTMLElement && target.isContentEditable) return true
+  if (target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return true
+  if (target instanceof HTMLInputElement) {
+    return TEXTUAL_INPUT_TYPES.has(target.type)
+  }
+  return false
 }
 
 // Resilient storage helpers
@@ -381,9 +401,18 @@ const formatTime = (milliseconds: number) => {
 export default function App() {
   const prefersReducedMotion = usePrefersReducedMotion()
   const focusRingClasses = 'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500'
-  const reducedMotionAttribute = prefersReducedMotion ? 'motion-reduce:transition-none motion-reduce:transform-none' : ''
+  const reducedMotionAttribute = prefersReducedMotion
+    ? 'motion-reduce:transition-none motion-reduce:transform-none'
+    : ''
 
-  const rootClasses = 'min-h-screen px-6 py-10 bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-50'
+  const rootClasses =
+    'min-h-screen overflow-x-hidden px-4 py-10 bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-50'
+
+  const mainGridClasses =
+    'mx-auto grid w-full max-w-6xl gap-8 lg:grid-cols-[1.15fr_0.85fr]'
+
+  const timerSectionBase = `min-h-0 min-w-0 rounded-3xl border border-slate-200 bg-white/80 p-6 shadow-lg shadow-slate-400/10 dark:border-slate-700 dark:bg-slate-900/70 ${reducedMotionAttribute}`
+  const settingsSectionBase = `min-h-0 min-w-0 rounded-3xl border border-slate-200 bg-white/80 px-5 py-6 shadow-lg shadow-slate-400/10 dark:border-slate-700 dark:bg-slate-900/70 ${reducedMotionAttribute}`
 
   const [timerSettings, setTimerSettings] = usePersistedState<TimerSettings>(
     TIMER_SETTINGS_KEY,
@@ -631,17 +660,15 @@ export default function App() {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.repeat) return
+      if (isTypingElement(event.target)) return
       const key = event.key.toLowerCase()
       if (key === ' ' || key === 'spacebar') {
         event.preventDefault()
-        setTimerState(prev => {
-          if (prev.status === 'RUNNING') {
-            pauseTimer()
-            return prev
-          }
+        if (timerState.status === 'RUNNING') {
+          pauseTimer()
+        } else {
           startOrResumeTimer()
-          return prev
-        })
+        }
         return
       }
 
@@ -657,7 +684,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [pauseTimer, resetTimer, skipTimer, startOrResumeTimer])
+  }, [pauseTimer, resetTimer, skipTimer, startOrResumeTimer, timerState.status])
 
   useEffect(() => {
     if (timerState.status !== 'RUNNING') return
@@ -728,11 +755,8 @@ export default function App() {
 
   return (
     <div className={rootClasses}>
-      <div className="mx-auto grid w-full max-w-6xl gap-8 lg:grid-cols-[1.15fr_0.85fr]">
-        <section
-          className={`rounded-3xl border border-slate-200 bg-white/80 p-6 shadow-lg shadow-slate-400/10 dark:border-slate-700 dark:bg-slate-900/70 ${reducedMotionAttribute}`}
-          aria-label="Pomodoro timer control"
-        >
+      <main className={`${mainGridClasses} lg:space-y-0`}>
+        <section className={timerSectionBase} aria-label="Pomodoro timer control">
           <header className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
             <div>
               <p className="text-xs uppercase tracking-[0.4em] text-slate-400 dark:text-slate-500">Current session</p>
@@ -748,7 +772,7 @@ export default function App() {
           </header>
           <div className="mt-6 grid gap-4 md:grid-cols-[1fr_auto]">
             <div
-              className="flex flex-col items-center justify-center rounded-2xl border border-slate-100 bg-slate-50 px-6 py-8 text-center shadow-inner shadow-slate-200/50 dark:border-slate-800 dark:bg-slate-950/50"
+              className="flex min-h-[12rem] flex-col items-center justify-center rounded-2xl border border-slate-100 bg-slate-50 px-6 py-8 text-center shadow-inner shadow-slate-200/50 dark:border-slate-800 dark:bg-slate-950/50"
               aria-live="polite"
               aria-atomic="true"
             >
@@ -785,7 +809,7 @@ export default function App() {
             <button
               type="button"
               onClick={timerState.status === 'RUNNING' ? pauseTimer : startOrResumeTimer}
-              className={`rounded-full bg-slate-900 px-6 py-3 text-sm font-semibold text-white shadow-lg transition ${focusRingClasses} ${timerState.status === 'RUNNING' ? 'hover:bg-slate-800 dark:hover:bg-slate-700' : 'hover:bg-slate-800 dark:hover:bg-slate-700'}`}
+              className={`group rounded-full bg-slate-900 px-6 py-3 text-sm font-semibold text-white shadow-lg transition ${focusRingClasses} ${timerState.status === 'RUNNING' ? 'hover:bg-slate-800 dark:hover:bg-slate-700' : 'hover:bg-slate-800 dark:hover:bg-slate-700'}`}
               aria-label={primaryButtonLabel}
             >
               {primaryButtonLabel}
@@ -808,10 +832,7 @@ export default function App() {
           </div>
         </section>
 
-        <section
-          className={`rounded-3xl border border-slate-200 bg-white/80 px-5 py-6 shadow-lg shadow-slate-400/10 dark:border-slate-700 dark:bg-slate-900/70 ${reducedMotionAttribute}`}
-          aria-label="Pomodoro settings and shortcut list"
-        >
+        <section className={settingsSectionBase} aria-label="Pomodoro settings and shortcut list">
           <div className="flex flex-col gap-2">
             <div className="flex items-center justify-between">
               <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-50">Settings & shortcuts</h3>
@@ -823,8 +844,8 @@ export default function App() {
               Navigate the timer without touching your mouse and keep visual focus cues intact.
             </p>
           </div>
-          <div className="mt-6 grid gap-6 sm:grid-cols-2">
-            <div>
+          <div className="mt-6 grid gap-6 md:grid-cols-2">
+            <div className="space-y-6">
               <h4 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2">Timer Settings</h4>
               <fieldset className="space-y-3" aria-label="Preset timer styles" role="group">
                 <legend className="text-xs uppercase tracking-[0.3em] text-slate-400 dark:text-slate-500 mb-2">
@@ -835,7 +856,7 @@ export default function App() {
                     <label
                       key={key}
                       htmlFor={`preset-${key}`}
-                      className={`flex items-center gap-2 rounded-xl border border-transparent px-3 py-2 text-sm font-semibold text-slate-700 transition-colors focus-within:border-sky-500 focus-within:ring-0 dark:text-slate-300 ${focusRingClasses}`}
+                      className={`flex min-w-[10rem] items-start gap-2 rounded-xl border border-transparent px-3 py-2 text-sm font-semibold text-slate-700 transition-colors focus-within:border-sky-500 focus-within:ring-0 dark:text-slate-300 ${focusRingClasses}`}
                     >
                       <input
                         id={`preset-${key}`}
@@ -957,11 +978,11 @@ export default function App() {
                 </label>
               </div>
             </div>
-            <div className="flex flex-col gap-3">
+            <div className="space-y-3">
               {shortcutHints.map(hint => (
                 <article
                   key={hint.shortcut}
-                  className="flex flex-col gap-1 rounded-2xl border border-slate-100 bg-slate-50/90 px-4 py-3 text-slate-900 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-50"
+                  className="flex min-h-[4.5rem] min-w-0 flex-col gap-1 rounded-2xl border border-slate-100 bg-slate-50/90 px-4 py-3 text-slate-900 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-50"
                   role="region"
                   aria-label={`Shortcut hint for ${hint.shortcut}`}
                 >
@@ -974,7 +995,7 @@ export default function App() {
             </div>
           </div>
         </section>
-      </div>
+      </main>
     </div>
   )
 }
