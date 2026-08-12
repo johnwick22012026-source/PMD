@@ -10,7 +10,6 @@ import {
 
 const THEME_KEY = 'pomodoro_theme'
 const TIMER_SETTINGS_KEY = 'pomodoro_timer_settings'
-const CURRENT_TASK_KEY = 'pomodoro_current_task'
 const HISTORY_KEY = 'pomodoro_history'
 const TIMER_STATE_KEY = 'pomodoro_timer_state'
 const CYCLE_STATE_KEY = 'pomodoro_cycle_state'
@@ -137,6 +136,21 @@ const isTimerSettings = (value: unknown): value is TimerSettings =>
   typeof (value as any).autoStartBreaks === 'boolean' &&
   typeof (value as any).soundEnabled === 'boolean'
 
+// Validators for history and cycle state
+const isHistoryEntry = (value: unknown): value is HistoryEntry =>
+  isObject(value) &&
+  typeof (value as any).label === 'string' &&
+  typeof (value as any).time === 'string' &&
+  ['focus', 'shortBreak', 'longBreak'].includes((value as any).type)
+
+const isHistory = (value: unknown): value is HistoryEntry[] =>
+  Array.isArray(value) && value.every(isHistoryEntry)
+
+const isCycleState = (value: unknown): value is CycleState =>
+  isObject(value) &&
+  typeof (value as any).focusStreak === 'number' &&
+  typeof (value as any).completedFocusSessions === 'number'
+
 const readLocalValue = <T,>(
   key: string,
   fallback: () => T,
@@ -253,6 +267,12 @@ const stateCopy: Record<TimerPhase, { headline: string; description: string }> =
   nextSession: { headline: 'Next session queued', description: '' },
 }
 
+const sessionLabels: Record<SessionMode, string> = {
+  focus: 'Focus',
+  shortBreak: 'Short Break',
+  longBreak: 'Long Break',
+}
+
 export default function App() {
   const [theme, setTheme] = usePersistedState<'light' | 'dark'>(
     THEME_KEY,
@@ -265,6 +285,7 @@ export default function App() {
     () => DEFAULT_TIMER_SETTINGS,
     isTimerSettings,
   )
+
   const persistedTimer = useMemo(() => readPersistedTimerState(), [])
 
   const [sessionMode, setSessionMode] = useState<SessionMode>(() => persistedTimer.mode)
@@ -279,6 +300,24 @@ export default function App() {
     }
     return getSessionDurationMs(persistedTimer.mode, timerSettings)
   })
+
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false)
+  const [completedMode, setCompletedMode] = useState<SessionMode | null>(null)
+  const [nextMode, setNextMode] = useState<SessionMode>(() =>
+    determineNextMode(persistedTimer.mode, DEFAULT_CYCLE_STATE.focusStreak, timerSettings.sessionsBeforeLongBreak),
+  )
+
+  // Persisted history and cycle state
+  const [history, setHistory] = usePersistedState<HistoryEntry[]>(
+    HISTORY_KEY,
+    () => DEFAULT_HISTORY_ENTRIES,
+    isHistory,
+  )
+  const [cycleState, setCycleState] = usePersistedState<CycleState>(
+    CYCLE_STATE_KEY,
+    () => DEFAULT_CYCLE_STATE,
+    isCycleState,
+  )
 
   const targetEndRef = useRef<number | null>(null)
   const intervalRef = useRef<number | null>(null)
@@ -360,15 +399,54 @@ export default function App() {
       if (diff <= 0) {
         if (intervalRef.current) clearInterval(intervalRef.current)
         playCompletionTone()
-        const nextMode = determineNextMode(sessionMode, 0, timerSettings.sessionsBeforeLongBreak)
+        setCompletedMode(sessionMode)
+        const upcoming = determineNextMode(sessionMode, cycleState.focusStreak, timerSettings.sessionsBeforeLongBreak)
+        setNextMode(upcoming)
         setTimerPhase('completed')
-        setSessionMode(nextMode)
+        setPausedMs(null)
+        setRemainingMs(0)
+        targetEndRef.current = null
+
+        // record history entry
+        setHistory(prev => [
+          ...prev,
+          { label: sessionLabels[sessionMode], time: new Date().toISOString(), type: sessionMode },
+        ])
+
+        // update cycle state
+        setCycleState(prev => {
+          if (sessionMode === 'focus') {
+            const newStreak = prev.focusStreak + 1
+            return { focusStreak: newStreak, completedFocusSessions: prev.completedFocusSessions + 1 }
+          }
+          return { ...prev, focusStreak: 0 }
+        })
       }
     }, 250)
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current)
     }
-  }, [timerPhase, sessionMode, timerSettings.sessionsBeforeLongBreak, playCompletionTone])
+  }, [timerPhase, sessionMode, timerSettings.sessionsBeforeLongBreak, playCompletionTone, cycleState.focusStreak])
+
+  useEffect(() => {
+    if (!isBrowser) return
+    const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const set = () => setPrefersReducedMotion(mediaQuery.matches)
+    set()
+    const handler = (event: MediaQueryListEvent) => setPrefersReducedMotion(event.matches)
+    if (typeof mediaQuery.addEventListener === 'function') {
+      mediaQuery.addEventListener('change', handler)
+    } else if (typeof mediaQuery.addListener === 'function') {
+      mediaQuery.addListener(handler)
+    }
+    return () => {
+      if (typeof mediaQuery.removeEventListener === 'function') {
+        mediaQuery.removeEventListener('change', handler)
+      } else if (typeof mediaQuery.removeListener === 'function') {
+        mediaQuery.removeListener(handler)
+      }
+    }
+  }, [])
 
   const startTimer = useCallback(() => {
     if (timerPhase === 'running') return
@@ -389,6 +467,18 @@ export default function App() {
     setTimerPhase('paused')
   }
 
+  const handleContinueToNextSession = useCallback(() => {
+    if (!nextMode) return
+    const sessionDuration = getSessionDurationMs(nextMode, timerSettings)
+    const endAt = Date.now() + Math.max(0, sessionDuration)
+    targetEndRef.current = endAt
+    setSessionMode(nextMode)
+    setRemainingMs(sessionDuration)
+    setPausedMs(null)
+    setCompletedMode(null)
+    setTimerPhase('running')
+  }, [nextMode, timerSettings])
+
   const primaryButton = useMemo(() => {
     switch (timerPhase) {
       case 'running':
@@ -398,13 +488,14 @@ export default function App() {
     }
   }, [timerPhase, pauseTimer, startTimer])
 
-  const timerLabel = useMemo(() => {
-    switch (sessionMode) {
-      case 'focus': return 'Focus'
-      case 'shortBreak': return 'Short Break'
-      case 'longBreak': return 'Long Break'
-    }
-  }, [sessionMode])
+  const timerLabel = useMemo(() => sessionLabels[sessionMode], [sessionMode])
+
+  const completionPanelVisible = timerPhase === 'completed' && completedMode !== null
+  const completionLabel = completedMode ? sessionLabels[completedMode] : ''
+  const upcomingLabel = sessionLabels[nextMode]
+  const completionPanelMotionClass = prefersReducedMotion
+    ? 'transition-none'
+    : `${sharedTokens.motion}`
 
   const rootClasses = `${getSurfaceStyles(theme)} min-h-screen flex flex-col ${sharedTokens.motion}`
 
@@ -421,9 +512,41 @@ export default function App() {
       <main className="flex flex-1 flex-col items-center justify-center">
         <h2 className="text-2xl font-semibold mb-4">{timerLabel} Session</h2>
         <div className="text-6xl font-mono mb-6">{formatTime(remainingMs)}</div>
+        <div
+          className={`
+            ${completionPanelMotionClass}
+            ${completionPanelVisible ? 'opacity-100 translate-y-0 pointer-events-auto' : 'opacity-0 translate-y-2 pointer-events-none'}
+            relative w-full max-w-md rounded-2xl border border-white/40 bg-white/90 dark:bg-slate-900/80 dark:border-slate-700/80 p-6 mb-6 flex flex-col gap-3 shadow-lg
+          `}
+          aria-live="polite"
+          role="status"
+        >
+          <p className="text-xs uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+            Session complete
+          </p>
+          <p className="text-lg font-semibold text-slate-900 dark:text-slate-50">
+            {completionLabel} session finished!
+          </p>
+          <p className="text-sm text-slate-600 dark:text-slate-300">
+            Ready for the next chapter? {upcomingLabel} is standing by to keep you in flow.
+          </p>
+          <button
+            type="button"
+            onClick={handleContinueToNextSession}
+            className="mt-2 px-4 py-2 bg-emerald-600 text-white rounded-full text-sm font-semibold shadow-lg shadow-emerald-400/30"
+          >
+            Start {upcomingLabel}
+          </button>
+        </div>
         <button
           onClick={primaryButton.action}
-          className="px-6 py-3 bg-green-500 text-white rounded-full"
+          disabled={timerPhase === 'completed'}
+          className={`
+            px-6 py-3 rounded-full text-white ${
+              timerPhase === 'running' ? 'bg-amber-500' : 'bg-green-500'
+            }
+            ${timerPhase === 'completed' ? 'opacity-50 cursor-not-allowed' : ''}
+          `}
         >
           {primaryButton.label}
         </button>
