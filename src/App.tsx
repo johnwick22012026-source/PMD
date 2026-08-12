@@ -19,11 +19,28 @@ const historyEntries = [
   { label: 'Long break • 15m', time: 'Yesterday • 5:10 PM' },
 ]
 
+const THEME_KEY = 'pomodoro_theme'
+
+const getInitialTheme = (): 'light' | 'dark' => {
+  if (typeof window === 'undefined') {
+    return 'dark'
+  }
+
+  const stored = window.localStorage.getItem(THEME_KEY)
+  if (stored === 'light' || stored === 'dark') {
+    return stored
+  }
+
+  const prefersDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches
+  return prefersDark ? 'dark' : 'light'
+}
+
 export default function App() {
-  const [theme, setTheme] = useState<'light' | 'dark'>('light')
+  const [theme, setTheme] = useState<'light' | 'dark'>(getInitialTheme)
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
+    window.localStorage.setItem(THEME_KEY, theme)
   }, [theme])
 
   const themeLabel = useMemo(() => (theme === 'light' ? 'Premium light' : 'Premium dark'), [theme])
@@ -31,7 +48,7 @@ export default function App() {
   const mutedText = theme === 'light' ? 'text-slate-500' : 'text-slate-400'
   const sectionBg = theme === 'light' ? 'bg-white/80 border-slate-200/70 shadow-[0_25px_60px_rgba(15,23,42,0.3)]' : 'bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950 border border-white/5 shadow-[0_20px_45px_rgba(8,15,32,0.5)]'
   const tabBg = theme === 'light' ? 'border border-slate-200/80 bg-white/80 text-slate-900 shadow-[0_10px_30px_rgba(15,23,42,0.15)]' : 'border border-white/10 bg-slate-900/80 text-white shadow-inner shadow-black/40'
-  const controlBg = theme === 'light' ? 'bg-gradient-to-br from-slate-100 to-slate-200' : 'bg-gradient-to-br from-slate-900 to-slate-950'
+  const tabTimerText = theme === 'light' ? 'text-slate-900' : 'text-white'
 
   const toggleTheme = () => setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))
 
@@ -47,10 +64,20 @@ export default function App() {
           <div className="flex items-center gap-3">
             <div className="text-xs tracking-[0.3em] uppercase text-slate-500">Theme</div>
             <button
-              className="relative inline-flex items-center px-4 py-2 rounded-full bg-gradient-to-r from-slate-800 via-slate-900 to-slate-900 border border-white/10 shadow-lg shadow-slate-950/30"
+              type="button"
               onClick={toggleTheme}
+              aria-pressed={theme === 'dark'}
+              aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
+              className="group relative inline-flex items-center gap-2 px-4 py-2 rounded-full bg-gradient-to-r from-slate-800 via-slate-900 to-slate-900 border border-white/10 shadow-lg shadow-slate-950/30 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400"
             >
               <span className="text-sm font-medium text-white">{themeLabel}</span>
+              <span
+                className={`inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/30 text-base transition-transform duration-200 ${
+                  theme === 'dark' ? 'translate-x-0 bg-slate-900 text-slate-50' : 'translate-x-0 bg-slate-50 text-slate-900'
+                }`}
+              >
+                {theme === 'light' ? '☀' : '☾'}
+              </span>
             </button>
           </div>
         </header>
@@ -65,7 +92,7 @@ export default function App() {
                   <p className={`text-sm ${mutedText}`}>Keep a single priority task for the session.</p>
                 </div>
                 <button
-                  className="px-4 py-1 rounded-full border border-white/20 text-sm text-white/80 transition hover:bg-white/10"
+                  className="px-4 py-1 rounded-full border border-white/20 text-sm text-white/80 transition hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400"
                   type="button"
                 >
                   Edit
@@ -77,13 +104,19 @@ export default function App() {
               {['Focus', 'Short break', 'Long break'].map((tab) => (
                 <div key={tab} className={`flex flex-col gap-1 rounded-2xl p-4 ${tabBg}`}>
                   <p className={`text-xs uppercase tracking-[0.4em] ${mutedText}`}>{tab}</p>
-                  <p className="text-2xl font-semibold text-white">25:00</p>
+                  <p className={`text-2xl font-semibold ${tabTimerText}`}>25:00</p>
                   <p className={`text-xs ${mutedText}`}>Cycle • 3/4</p>
                 </div>
               ))}
             </div>
 
-            <div className={`rounded-3xl border border-white/10 p-6 text-center ${theme === 'light' ? 'bg-gradient-to-br from-white via-slate-100 to-slate-200 shadow-[0_25px_60px_rgba(15,23,42,0.3)]' : 'bg-gradient-to-br from-slate-900 via-slate-950 to-slate-900 shadow-[0_25px_60px_rgba(12,17,33,0.65)]'}`}>
+            <div
+              className={`rounded-3xl border border-white/10 p-6 text-center ${
+                theme === 'light'
+                  ? 'bg-gradient-to-br from-white via-slate-100 to-slate-200 shadow-[0_25px_60px_rgba(15,23,42,0.3)]'
+                  : 'bg-gradient-to-br from-slate-900 via-slate-950 to-slate-900 shadow-[0_25px_60px_rgba(12,17,33,0.65)]'
+              }`}
+            >
               <div className={`mx-auto h-[260px] w-[260px] rounded-full border border-white/10 bg-gradient-to-br ${primaryGradient}`}></div>
               <div className="mt-6 text-left">
                 <p className={`text-sm uppercase tracking-[0.35em] ${mutedText}`}>Session</p>
@@ -92,11 +125,19 @@ export default function App() {
               </div>
             </div>
 
-            <div className={`group grid grid-cols-2 rounded-2xl border border-white/10 p-4 ${theme === 'light' ? 'bg-white/80 shadow-[0_20px_40px_rgba(15,23,42,0.3)]' : 'bg-slate-900/70 shadow-[0_25px_60px_rgba(5,6,20,0.75)]'}`}>
+            <div className={`group grid grid-cols-2 rounded-2xl border border-white/10 p-4 ${
+              theme === 'light'
+                ? 'bg-white/80 shadow-[0_20px_40px_rgba(15,23,42,0.3)]'
+                : 'bg-slate-900/70 shadow-[0_25px_60px_rgba(5,6,20,0.75)]'
+            }`}>
               {['Start', 'Pause', 'Reset', 'Skip'].map((control) => (
                 <button
                   key={control}
-                  className={`rounded-2xl border border-white/10 px-3 py-2 text-sm font-semibold uppercase tracking-[0.35em] transition hover:border-white/40 ${theme === 'light' ? 'bg-gradient-to-br from-slate-100 to-slate-200 text-slate-900 hover:text-slate-900' : 'bg-gradient-to-br from-slate-900 to-slate-950 text-slate-300 text-white'}`}
+                  className={`rounded-2xl border border-white/10 px-3 py-2 text-sm font-semibold uppercase tracking-[0.35em] transition hover:border-white/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400 ${
+                    theme === 'light'
+                      ? 'bg-gradient-to-br from-slate-100 to-slate-200 text-slate-900 hover:text-slate-900'
+                      : 'bg-gradient-to-br from-slate-900 to-slate-950 text-slate-300'
+                  }`}
                   type="button"
                 >
                   {control}
@@ -143,15 +184,29 @@ export default function App() {
               </div>
             </div>
 
-            <div className={`rounded-3xl border border-white/10 p-5 ${theme === 'light' ? 'bg-white/70 shadow-[0_15px_40px_rgba(15,23,42,0.18)]' : 'bg-gradient-to-br from-slate-900 via-slate-950 to-slate-900 shadow-[0_15px_40px_rgba(0,0,0,0.65)]'}`}>
+            <div className={`rounded-3xl border border-white/10 p-5 ${
+              theme === 'light'
+                ? 'bg-white/70 shadow-[0_15px_40px_rgba(15,23,42,0.18)]'
+                : 'bg-gradient-to-br from-slate-900 via-slate-950 to-slate-900 shadow-[0_15px_40px_rgba(0,0,0,0.65)]'
+            }`}>
               <p className={`text-sm uppercase tracking-[0.4em] ${mutedText}`}>Checklist</p>
               <div className="mt-4 space-y-3">
                 {sections.map((item) => (
                   <div
                     key={item.label}
-                    className={`flex items-start gap-3 rounded-2xl border px-4 py-3 ${theme === 'light' ? 'border-slate-200/60 bg-slate-100/80 text-slate-900' : 'border-white/5 bg-white/5 text-white'}`}
+                    className={`flex items-start gap-3 rounded-2xl border px-4 py-3 ${
+                      theme === 'light'
+                        ? 'border-slate-200/60 bg-slate-100/80 text-slate-900'
+                        : 'border-white/5 bg-white/5 text-white'
+                    }`}
                   >
-                    <div className={`flex h-8 w-8 items-center justify-center rounded-2xl border bg-slate-900/80 text-xs font-semibold uppercase tracking-[0.3em] ${theme === 'light' ? 'border-slate-200/70 text-slate-50 bg-slate-900/80' : 'border-white/20'}`}>
+                    <div
+                      className={`flex h-8 w-8 items-center justify-center rounded-2xl border bg-slate-900/80 text-xs font-semibold uppercase tracking-[0.3em] ${
+                        theme === 'light'
+                          ? 'border-slate-200/70 text-slate-50 bg-slate-900/80'
+                          : 'border-white/20'
+                      }`}
+                    >
                       {item.label[0]}
                     </div>
                     <div>
