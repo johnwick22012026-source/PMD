@@ -1,6 +1,7 @@
 import {
   Dispatch,
   SetStateAction,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -195,6 +196,12 @@ const sessionModeLabel: Record<SessionMode, string> = {
   longBreak: 'Long break',
 }
 
+const historySessionLabel: Record<SessionMode, string> = {
+  focus: 'Focus session',
+  shortBreak: 'Short break',
+  longBreak: 'Long break',
+}
+
 const sharedTokens = {
   motion: 'motion-safe:transition motion-safe:duration-200 motion-safe:ease-out motion-reduce:transition-none',
   focusRing: 'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400',
@@ -248,6 +255,36 @@ export default function App() {
     () => DEFAULT_HISTORY_ENTRIES,
     isHistoryEntryArray,
   )
+
+  const handleSessionComplete = useCallback(
+    (completedMode: SessionMode) => {
+      const now = new Date()
+      const formattedTime = now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+
+      setHistoryEntries((prev) => [
+        {
+          label: `${historySessionLabel[completedMode]} • ${formatDuration(timerSettings[completedMode])}`,
+          time: `Today • ${formattedTime}`,
+          type: completedMode,
+        },
+        ...prev,
+      ])
+    },
+    [timerSettings, setHistoryEntries],
+  )
+
+  const {
+    mode,
+    timerState,
+    remainingSeconds,
+    durationSeconds,
+    selectMode,
+    start,
+    pause,
+    resume,
+    reset,
+    skip,
+  } = usePomodoroTimer(timerSettings, handleSessionComplete)
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -331,19 +368,6 @@ export default function App() {
     }))
   }
 
-  const {
-    mode,
-    timerState,
-    remainingSeconds,
-    durationSeconds,
-    selectMode,
-    start,
-    pause,
-    resume,
-    reset,
-    skip,
-  } = usePomodoroTimer(timerSettings)
-
   const countdownDisplay = formatCountdown(remainingSeconds)
   const sessionStateLabel: Record<TimerPhase, string> = {
     idle: 'Ready to start',
@@ -365,9 +389,19 @@ export default function App() {
     { mode: 'longBreak', label: 'Long break', duration: timerSettings.longBreak },
   ]
 
-  const primaryActionLabel =
-    timerState === 'paused' ? 'Resume' : timerState === 'running' ? 'Running' : 'Start'
-  const primaryActionHandler = timerState === 'paused' ? resume : start
+  let primaryActionLabel = 'Start'
+  let primaryActionHandler = start
+  let primaryActionAriaLabel = `${sessionModeLabel[mode]} session is ready to begin`
+
+  if (timerState === 'running') {
+    primaryActionLabel = 'Pause'
+    primaryActionHandler = pause
+    primaryActionAriaLabel = 'Pause the current timer'
+  } else if (timerState === 'paused') {
+    primaryActionLabel = 'Resume'
+    primaryActionHandler = resume
+    primaryActionAriaLabel = 'Resume the paused timer'
+  }
 
   return (
     <div className={rootClasses}>
@@ -401,7 +435,7 @@ export default function App() {
 
         <main className="grid grid-cols-1 gap-6 md:grid-cols-[1.1fr_0.9fr]">
           <section className="space-y-6">
-            <div className={`${sharedTokens.cardCorners} ${sharedTokens.cardPadding} ${getSurfaceStyles(theme, 'card')} ${sharedTokens.motion} shadow-lg`}> 
+            <div className={`${sharedTokens.cardCorners} ${sharedTokens.cardPadding} ${getSurfaceStyles(theme, 'card')} ${sharedTokens.motion} shadow-lg`}>
               <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
                 <div className="flex-1 space-y-3">
                   <div>
@@ -429,15 +463,22 @@ export default function App() {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+            <div
+              role="tablist"
+              aria-label="Session selector"
+              className="grid grid-cols-1 gap-3 md:grid-cols-3"
+            >
               {sessionTabs.map((tab) => {
                 const isActive = tab.mode === mode
                 return (
                   <button
                     key={tab.mode}
                     type="button"
+                    role="tab"
+                    aria-selected={isActive}
+                    aria-current={isActive ? 'page' : undefined}
                     onClick={() => selectMode(tab.mode)}
-                    className={`flex flex-col rounded-3xl border px-4 py-5 text-left shadow-[0_18px_30px_rgba(15,23,42,0.2)] transition ${sharedTokens.motion} ${isActive ? 'border-white/60 bg-slate-900/80 text-white' : getSurfaceStyles(theme, 'tab')}`}
+                    className={`flex flex-col rounded-3xl border px-4 py-5 text-left shadow-[0_18px_30px_rgba(15,23,42,0.2)] transition ${sharedTokens.motion} ${isActive ? 'border-white/80 bg-slate-900/90 text-white' : tabBase}`}
                   >
                     <div className="flex items-center justify-between">
                       <p className="text-xs uppercase tracking-[0.35em] text-slate-400">{sessionModeLabel[tab.mode]}</p>
@@ -450,7 +491,7 @@ export default function App() {
                     <p className={`mt-3 text-3xl font-semibold ${isActive ? '' : theme === 'light' ? 'text-slate-900' : 'text-white'}`}>
                       {formatDuration(tab.duration)}
                     </p>
-                    <span className={`${sharedTokens.badge} mt-2 ${getSurfaceStyles(theme, 'badge')} ${sharedTokens.motion}`}>{cycleLabel}</span>
+                    <span className={`${badgeClasses} mt-2`}>{cycleLabel}</span>
                   </button>
                 )
               })}
@@ -482,26 +523,19 @@ export default function App() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid gap-3 md:grid-cols-[1.5fr_0.75fr_0.75fr]">
               <button
                 type="button"
                 onClick={primaryActionHandler}
-                disabled={timerState === 'running'}
-                className={`${controlButtonBase} ${getSurfaceStyles(theme, 'button')} ${sharedTokens.motion} ${timerState === 'running' ? 'opacity-60 cursor-not-allowed' : ''}`}
+                aria-label={primaryActionAriaLabel}
+                className={`${controlButtonBase} ${primaryGradient} text-white shadow-[0_15px_35px_rgba(76,78,255,0.35)] text-lg tracking-[0.35em] uppercase`}
               >
                 {primaryActionLabel}
               </button>
               <button
                 type="button"
-                onClick={pause}
-                disabled={timerState !== 'running'}
-                className={`${controlButtonBase} ${getSurfaceStyles(theme, 'button')} ${sharedTokens.motion} ${timerState !== 'running' ? 'opacity-60 cursor-not-allowed' : ''}`}
-              >
-                Pause
-              </button>
-              <button
-                type="button"
                 onClick={reset}
+                aria-label="Reset the current timer"
                 className={`${controlButtonBase} ${getSurfaceStyles(theme, 'button')} ${sharedTokens.motion}`}
               >
                 Reset
@@ -509,6 +543,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={skip}
+                aria-label="Skip to the next session"
                 className={`${controlButtonBase} ${getSurfaceStyles(theme, 'button')} ${sharedTokens.motion}`}
               >
                 Skip
@@ -646,7 +681,10 @@ export default function App() {
   )
 }
 
-const usePomodoroTimer = (timerSettings: TimerSettings) => {
+const usePomodoroTimer = (
+  timerSettings: TimerSettings,
+  onSessionComplete?: (completedMode: SessionMode) => void,
+) => {
   const [mode, setMode] = useState<SessionMode>('focus')
   const [timerState, setTimerState] = useState<TimerPhase>('idle')
   const [endAt, setEndAt] = useState<number | null>(null)
@@ -654,6 +692,7 @@ const usePomodoroTimer = (timerSettings: TimerSettings) => {
   const [tick, setTick] = useState(() => Date.now())
   const intervalRef = useRef<number | null>(null)
   const focusCycleRef = useRef(0)
+  const completionHandledRef = useRef(false)
 
   const sessionDurations = useMemo(
     () => ({
@@ -727,7 +766,7 @@ const usePomodoroTimer = (timerSettings: TimerSettings) => {
     return durationSeconds
   }, [timerState, endAt, tick, pausedSeconds, durationSeconds])
 
-  const pickNextMode = (): SessionMode => {
+  const pickNextMode = () => {
     if (mode !== 'focus') {
       return 'focus'
     }
@@ -794,6 +833,39 @@ const usePomodoroTimer = (timerSettings: TimerSettings) => {
     const nextMode = pickNextMode()
     selectMode(nextMode)
   }
+
+  useEffect(() => {
+    if (timerState !== 'completed') {
+      completionHandledRef.current = false
+      return
+    }
+
+    if (completionHandledRef.current) {
+      return
+    }
+
+    completionHandledRef.current = true
+    const completedMode = mode
+    onSessionComplete?.(completedMode)
+
+    const nextMode = pickNextMode()
+    const shouldAutoStart = nextMode === 'focus' ? timerSettings.autoStartFocus : timerSettings.autoStartBreaks
+
+    if (shouldAutoStart) {
+      const now = Date.now()
+      setMode(nextMode)
+      setEndAt(now + sessionDurations[nextMode] * 1000)
+      setPausedSeconds(null)
+      setTimerState('running')
+      setTick(now)
+      return
+    }
+
+    setMode(nextMode)
+    setTimerState('idle')
+    setEndAt(null)
+    setPausedSeconds(null)
+  }, [timerState, mode, timerSettings, onSessionComplete, pickNextMode, sessionDurations])
 
   return {
     mode,
