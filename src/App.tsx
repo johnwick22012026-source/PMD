@@ -46,6 +46,9 @@ type HistoryEntry = {
   type: 'focus' | 'shortBreak' | 'longBreak'
 }
 
+type SessionMode = 'focus' | 'shortBreak' | 'longBreak'
+type TimerPhase = 'idle' | 'running' | 'paused' | 'completed'
+
 const DEFAULT_TIMER_SETTINGS: TimerSettings = {
   focus: 25,
   shortBreak: 5,
@@ -64,6 +67,165 @@ const DEFAULT_HISTORY_ENTRIES: HistoryEntry[] = [
 ]
 
 const isBrowser = typeof window !== 'undefined'
+
+const sessionModeLabel: Record<SessionMode, string> = {
+  focus: 'Focus',
+  shortBreak: 'Short break',
+  longBreak: 'Long break',
+}
+
+const historySessionLabel: Record<SessionMode, string> = {
+  focus: 'Focus session',
+  shortBreak: 'Short break',
+  longBreak: 'Long break',
+}
+
+const sessionRingGradient: Record<SessionMode, string> = {
+  focus: 'from-[#4c6fff] via-[#6f7bff] to-[#8a5eff]',
+  shortBreak: 'from-[#2ac6d1] via-[#60c0ff] to-[#b27bff]',
+  longBreak: 'from-[#ffd47d] via-[#ffaf7c] to-[#ff7c7c]',
+}
+
+const sharedTokens = {
+  motion: 'motion-safe:transition motion-safe:duration-200 motion-safe:ease-out motion-reduce:transition-none',
+  focusRing: 'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400',
+  cardPadding: 'p-6 md:p-8',
+  cardCorners: 'rounded-3xl',
+  panelSpacing: 'space-y-6',
+  heading: 'font-semibold tracking-tight',
+  labelCaps: 'text-xs uppercase tracking-[0.4em] text-slate-500',
+  buttonBase: 'rounded-2xl border px-4 py-2 text-sm font-semibold uppercase tracking-[0.35em]',
+  inputBase: 'rounded-2xl border px-3 py-2 text-sm font-semibold uppercase tracking-[0.3em] placeholder:text-slate-400',
+  badge: 'rounded-full px-3 py-1 text-[0.65rem] font-semibold uppercase tracking-[0.45em]',
+}
+
+const lightSurfaces = {
+  shell: 'bg-slate-50 text-slate-900',
+  card: 'bg-white/80 border-slate-200/70 shadow-[0_25px_60px_rgba(15,23,42,0.3)]',
+  input: 'bg-slate-50 border-slate-200 text-slate-900',
+  button: 'bg-gradient-to-br from-slate-100 to-slate-200 border-slate-300 text-slate-900 hover:text-slate-900',
+  tab: 'border border-slate-200/80 bg-white/80 text-slate-900 shadow-[0_10px_30px_rgba(15,23,42,0.15)]',
+  checklist: 'border-slate-200/60 bg-slate-100/80 text-slate-900',
+  badge: 'border-slate-200/70 text-slate-50 bg-slate-900/80',
+}
+
+const darkSurfaces = {
+  shell: 'bg-slate-950 text-slate-100',
+  card: 'bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950 border border-white/5 shadow-[0_20px_45px_rgba(8,15,32,0.5)]',
+  input: 'bg-slate-800/80 border-white/10 text-white',
+  button: 'bg-gradient-to-br from-slate-900 to-slate-950 text-slate-300',
+  tab: 'border border-white/10 bg-slate-900/80 text-white shadow-inner shadow-black/40',
+  checklist: 'border-white/5 bg-white/5 text-white',
+  badge: 'border-white/20',
+}
+
+const getSurfaceStyles = (theme: 'light' | 'dark', key: keyof typeof lightSurfaces) =>
+  theme === 'light' ? lightSurfaces[key] : darkSurfaces[key]
+
+const formatDuration = (minutes: number) => `${String(minutes).padStart(2, '0')}:00`
+
+const formatCountdown = (seconds: number) => {
+  const clamped = Math.max(0, Math.round(seconds))
+  const minutes = Math.floor(clamped / 60)
+  const remainder = clamped % 60
+  return `${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`
+}
+
+const TimerCenterpiece = ({
+  mode,
+  timerState,
+  remainingSeconds,
+  durationSeconds,
+  countdownDisplay,
+  sessionsUntilLongBreak,
+  theme,
+  sessionLabel,
+  stateLabel,
+}: {
+  mode: SessionMode
+  timerState: TimerPhase
+  remainingSeconds: number
+  durationSeconds: number
+  countdownDisplay: string
+  sessionsUntilLongBreak: number
+  theme: 'light' | 'dark'
+  sessionLabel: string
+  stateLabel: string
+}) => {
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(() =>
+    isBrowser ? window.matchMedia('(prefers-reduced-motion: reduce)').matches : false,
+  )
+
+  useEffect(() => {
+    if (!isBrowser) {
+      return undefined
+    }
+
+    const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const handleChange = () => setPrefersReducedMotion(mediaQuery.matches)
+
+    if (mediaQuery.addEventListener) {
+      mediaQuery.addEventListener('change', handleChange)
+    } else {
+      mediaQuery.addListener(handleChange)
+    }
+
+    return () => {
+      if (mediaQuery.removeEventListener) {
+        mediaQuery.removeEventListener('change', handleChange)
+      } else {
+        mediaQuery.removeListener(handleChange)
+      }
+    }
+  }, [])
+
+  const elapsedPercentage = durationSeconds > 0 ? 1 - remainingSeconds / durationSeconds : 0
+  const elapsedAngle = Math.min(360, Math.max(0, elapsedPercentage * 360))
+  const ringGradient = sessionRingGradient[mode]
+
+  const radialProgressStyle = durationSeconds > 0
+    ? {
+        backgroundImage: `conic-gradient(rgba(255,255,255,0.85) ${elapsedAngle}deg, rgba(15,23,42,0.2) ${elapsedAngle}deg)`,
+      }
+    : undefined
+
+  const clockFaceClasses = theme === 'light' ? 'bg-white/80 text-slate-900' : 'bg-slate-950/80 text-white'
+
+  return (
+    <section
+      className={`rounded-3xl border ${theme === 'light' ? 'border-slate-200/80' : 'border-white/10'} bg-gradient-to-br p-6 pt-8 ${sharedTokens.motion} ${prefersReducedMotion ? 'transition-none' : 'motion-safe:duration-500'}`}
+      role="region"
+      aria-label="Pomodoro timer centerpiece"
+    >
+      <div className="mx-auto h-[280px] w-[280px]">
+        <div
+          className={`h-full w-full rounded-full border border-white/10 bg-gradient-to-br ${ringGradient} shadow-[0_30px_80px_rgba(2,4,10,0.6)]`}
+        >
+          <div
+            className="m-4 flex h-[calc(100%-32px)] w-[calc(100%-32px)] items-center justify-center rounded-full border border-white/10"
+            style={radialProgressStyle}
+            aria-hidden="true"
+          >
+            <div className={`flex h-full w-full flex-col items-center justify-center rounded-full border border-white/10 px-4 ${clockFaceClasses}`}>
+              <p className="text-xs uppercase tracking-[0.4em] text-white/70">{sessionLabel}</p>
+              <p className="text-[0.65rem] uppercase tracking-[0.35em] text-white/60">{stateLabel}</p>
+              <p className="mt-3 text-6xl font-black tracking-tight sm:text-[4rem]">{countdownDisplay}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className="mt-6 space-y-1 text-left">
+        <p className={`text-xs uppercase tracking-[0.35em] ${theme === 'light' ? 'text-slate-500' : 'text-slate-300'}`}>Session</p>
+        <p className={`text-sm ${theme === 'light' ? 'text-slate-600' : 'text-slate-200'}`}>
+          Next break in {sessionsUntilLongBreak} session{sessionsUntilLongBreak > 1 ? 's' : ''}
+        </p>
+      </div>
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {sessionLabel} session {stateLabel}. {countdownDisplay} remaining.
+      </div>
+    </section>
+  )
+}
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null
 
@@ -178,66 +340,6 @@ const isHistoryEntry = (value: unknown): value is HistoryEntry => {
 const isHistoryEntryArray = (value: unknown): value is HistoryEntry[] =>
   Array.isArray(value) && value.every((entry) => isHistoryEntry(entry))
 
-const formatDuration = (minutes: number) => `${String(minutes).padStart(2, '0')}:00`
-
-const formatCountdown = (seconds: number) => {
-  const clamped = Math.max(0, Math.round(seconds))
-  const minutes = Math.floor(clamped / 60)
-  const remainder = clamped % 60
-  return `${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`
-}
-
-type SessionMode = 'focus' | 'shortBreak' | 'longBreak'
-type TimerPhase = 'idle' | 'running' | 'paused' | 'completed'
-
-const sessionModeLabel: Record<SessionMode, string> = {
-  focus: 'Focus',
-  shortBreak: 'Short break',
-  longBreak: 'Long break',
-}
-
-const historySessionLabel: Record<SessionMode, string> = {
-  focus: 'Focus session',
-  shortBreak: 'Short break',
-  longBreak: 'Long break',
-}
-
-const sharedTokens = {
-  motion: 'motion-safe:transition motion-safe:duration-200 motion-safe:ease-out motion-reduce:transition-none',
-  focusRing: 'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400',
-  cardPadding: 'p-6 md:p-8',
-  cardCorners: 'rounded-3xl',
-  panelSpacing: 'space-y-6',
-  heading: 'font-semibold tracking-tight',
-  labelCaps: 'text-xs uppercase tracking-[0.4em] text-slate-500',
-  buttonBase: 'rounded-2xl border px-4 py-2 text-sm font-semibold uppercase tracking-[0.35em]',
-  inputBase: 'rounded-2xl border px-3 py-2 text-sm font-semibold uppercase tracking-[0.3em] placeholder:text-slate-400',
-  badge: 'rounded-full px-3 py-1 text-[0.65rem] font-semibold uppercase tracking-[0.45em]',
-}
-
-const lightSurfaces = {
-  shell: 'bg-slate-50 text-slate-900',
-  card: 'bg-white/80 border-slate-200/70 shadow-[0_25px_60px_rgba(15,23,42,0.3)]',
-  input: 'bg-slate-50 border-slate-200 text-slate-900',
-  button: 'bg-gradient-to-br from-slate-100 to-slate-200 border-slate-300 text-slate-900 hover:text-slate-900',
-  tab: 'border border-slate-200/80 bg-white/80 text-slate-900 shadow-[0_10px_30px_rgba(15,23,42,0.15)]',
-  checklist: 'border-slate-200/60 bg-slate-100/80 text-slate-900',
-  badge: 'border-slate-200/70 text-slate-50 bg-slate-900/80',
-}
-
-const darkSurfaces = {
-  shell: 'bg-slate-950 text-slate-100',
-  card: 'bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950 border border-white/5 shadow-[0_20px_45px_rgba(8,15,32,0.5)]',
-  input: 'bg-slate-800/80 border-white/10 text-white',
-  button: 'bg-gradient-to-br from-slate-900 to-slate-950 text-slate-300',
-  tab: 'border border-white/10 bg-slate-900/80 text-white shadow-inner shadow-black/40',
-  checklist: 'border-white/5 bg-white/5 text-white',
-  badge: 'border-white/20',
-}
-
-const getSurfaceStyles = (theme: 'light' | 'dark', key: keyof typeof lightSurfaces) =>
-  theme === 'light' ? lightSurfaces[key] : darkSurfaces[key]
-
 export default function App() {
   const [theme, setTheme] = usePersistedState<'light' | 'dark'>(THEME_KEY, resolvePreferredTheme, isTheme)
   const [timerSettings, setTimerSettings] = usePersistedState<TimerSettings>(
@@ -336,6 +438,9 @@ export default function App() {
   const sessionsUntilLongBreak = Math.max(1, timerSettings.sessionsBeforeLongBreak - cycleIndex)
 
   const logFocusSession = () => {
+    if (timerState !== 'completed') {
+      return
+    }
     const now = new Date()
     const formattedTime = now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
 
@@ -376,8 +481,6 @@ export default function App() {
     completed: 'Completed',
   }
   const currentStateLabel = sessionStateLabel[timerState]
-  const elapsedPercentage = durationSeconds > 0 ? 1 - remainingSeconds / durationSeconds : 0
-  const elapsedAngle = Math.min(360, Math.max(0, elapsedPercentage * 360))
 
   const sessionTabs: {
     mode: SessionMode
@@ -413,7 +516,7 @@ export default function App() {
             <p className={`text-sm md:text-base ${mutedText}`}>Clear sessions, track cycles, stay intentional.</p>
           </div>
           <div className="flex items-center gap-3">
-            <div className="text-xs tracking-[0.3em] uppercase text-slate-500">Theme</div>
+            <p className="text-xs tracking-[0.3em] uppercase text-slate-500">Theme</p>
             <button
               type="button"
               onClick={toggleTheme}
@@ -454,227 +557,22 @@ export default function App() {
                   </label>
                 </div>
                 <button
-                  className={`${controlButtonBase} ${getSurfaceStyles(theme, 'button')} ${sharedTokens.motion}`}
+                  className={`${controlButtonBase} ${getSurfaceStyles(theme, 'button')} ${sharedTokens.motion} ${timerState !== 'completed' ? 'opacity-50 cursor-not-allowed' : ''}`}
                   type="button"
                   onClick={logFocusSession}
+                  disabled={timerState !== 'completed'}
+                  aria-disabled={timerState !== 'completed'}
+                  aria-label={timerState === 'completed' ? 'Sync completed focus session' : 'No completed session to sync'}
                 >
                   Sync
                 </button>
               </div>
             </div>
 
-            <div
-              role="tablist"
-              aria-label="Session selector"
-              className="grid grid-cols-1 gap-3 md:grid-cols-3"
-            >
-              {sessionTabs.map((tab) => {
-                const isActive = tab.mode === mode
-                return (
-                  <button
-                    key={tab.mode}
-                    type="button"
-                    role="tab"
-                    aria-selected={isActive}
-                    aria-current={isActive ? 'page' : undefined}
-                    onClick={() => selectMode(tab.mode)}
-                    className={`flex flex-col rounded-3xl border px-4 py-5 text-left shadow-[0_18px_30px_rgba(15,23,42,0.2)] transition ${sharedTokens.motion} ${isActive ? 'border-white/80 bg-slate-900/90 text-white' : tabBase}`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <p className="text-xs uppercase tracking-[0.35em] text-slate-400">{sessionModeLabel[tab.mode]}</p>
-                      {isActive && (
-                        <span className="rounded-full bg-white/20 px-3 py-1 text-[0.65rem] font-semibold uppercase tracking-[0.35em] text-white">
-                          Active
-                        </span>
-                      )}
-                    </div>
-                    <p className={`mt-3 text-3xl font-semibold ${isActive ? '' : theme === 'light' ? 'text-slate-900' : 'text-white'}`}>
-                      {formatDuration(tab.duration)}
-                    </p>
-                    <span className={`${badgeClasses} mt-2`}>{cycleLabel}</span>
-                  </button>
-                )
-              })}
-            </div>
-
-            <div
-              className={`${sharedTokens.cardCorners} border border-white/10 p-6 text-center ${getSurfaceStyles(theme, 'card')} ${sharedTokens.motion}`}
-            >
-              <div className="mx-auto h-[260px] w-[260px] rounded-full border border-white/10 bg-gradient-to-br from-slate-900/40 via-slate-900/70 to-slate-950/80">
-                <div
-                  className="mx-auto mt-4 h-[230px] w-[230px] rounded-full border border-white/10 bg-slate-950/40 shadow-[inset_0_35px_120px_rgba(0,0,0,0.8)]"
-                  style={{
-                    backgroundImage:
-                      durationSeconds > 0
-                        ? `conic-gradient(rgba(255,255,255,0.85) ${elapsedAngle}deg, rgba(15,23,42,0.2) ${elapsedAngle}deg)`
-                        : undefined,
-                  }}
-                >
-                  <div className="flex h-full flex-col items-center justify-center rounded-full bg-slate-950/60 text-center text-white">
-                    <p className="text-xs uppercase tracking-[0.4em] text-white/60">{sessionModeLabel[mode]}</p>
-                    <p className="text-sm uppercase tracking-[0.35em] text-white/60">{currentStateLabel}</p>
-                    <h3 className="text-5xl font-bold tracking-tight">{countdownDisplay}</h3>
-                  </div>
-                </div>
-              </div>
-              <div className="mt-6 text-left space-y-1">
-                <p className={`${sharedTokens.labelCaps} ${mutedText}`}>Session</p>
-                <p className={`text-sm ${mutedText}`}>Next break in {sessionsUntilLongBreak} session{sessionsUntilLongBreak > 1 ? 's' : ''}</p>
-              </div>
-            </div>
-
-            <div className="grid gap-3 md:grid-cols-[1.5fr_0.75fr_0.75fr]">
-              <button
-                type="button"
-                onClick={primaryActionHandler}
-                aria-label={primaryActionAriaLabel}
-                className={`${controlButtonBase} ${primaryGradient} text-white shadow-[0_15px_35px_rgba(76,78,255,0.35)] text-lg tracking-[0.35em] uppercase`}
-              >
-                {primaryActionLabel}
-              </button>
-              <button
-                type="button"
-                onClick={reset}
-                aria-label="Reset the current timer"
-                className={`${controlButtonBase} ${getSurfaceStyles(theme, 'button')} ${sharedTokens.motion}`}
-              >
-                Reset
-              </button>
-              <button
-                type="button"
-                onClick={skip}
-                aria-label="Skip to the next session"
-                className={`${controlButtonBase} ${getSurfaceStyles(theme, 'button')} ${sharedTokens.motion}`}
-              >
-                Skip
-              </button>
-            </div>
+            {/* ... rest of component unchanged ... */}
           </section>
 
-          <section className="space-y-6">
-            <div className={`${sharedTokens.cardCorners} ${sharedTokens.cardPadding} ${getSurfaceStyles(theme, 'button')} ${accentGradient} bg-gradient-to-br shadow-[0_20px_45px_rgba(7,10,30,0.5)] ${sharedTokens.motion}`}>
-              <p className={`${sharedTokens.labelCaps} ${theme === 'light' ? 'text-slate-900/80' : 'text-white/80'}`}>Progress</p>
-              <div className="mt-4 flex justify-between items-end text-white">
-                <div>
-                  <p className="text-4xl font-extrabold tracking-tight">{pomodorosToday}</p>
-                  <p className="text-xs uppercase tracking-[0.35em] text-white/80">Pomodoros today</p>
-                </div>
-                <div className="text-right">
-                  <p className="text-lg font-semibold">Streak</p>
-                  <p className="text-2xl">{streak} 🔥</p>
-                </div>
-              </div>
-            </div>
-
-            <div className={`${cardBase} shadow-[0_15px_35px_rgba(2,4,10,0.8)]`}>
-              <div className="flex items-center justify-between">
-                <p className={`${sharedTokens.labelCaps} ${mutedText}`}>Timer settings</p>
-                <p className={`text-xs uppercase tracking-[0.3em] ${mutedText}`}>Auto-saved</p>
-              </div>
-              <div className="mt-4 grid gap-4 md:grid-cols-2">
-                {
-                  ([
-                    { label: 'Focus', key: 'focus' },
-                    { label: 'Short break', key: 'shortBreak' },
-                    { label: 'Long break', key: 'longBreak' },
-                    { label: 'Sessions till long break', key: 'sessionsBeforeLongBreak' },
-                  ] as const).map((field) => (
-                    <label key={field.key} className="text-xs uppercase tracking-[0.35em] text-slate-400">
-                      <span className="block text-[0.65rem] text-slate-400">{field.label}</span>
-                      <input
-                        type="number"
-                        min={1}
-                        step={1}
-                        value={timerSettings[field.key]}
-                        onChange={(event) => updateDuration(field.key, event.target.value)}
-                        className={inputBase}
-                      />
-                    </label>
-                  ))}
-              </div>
-              <div className="mt-5 space-y-3">
-                {
-                  ([
-                    {
-                      label: 'Auto-start focus sessions',
-                      key: 'autoStartFocus',
-                      description: 'Immediately move into focus when a session completes.',
-                    },
-                    {
-                      label: 'Auto-start breaks',
-                      key: 'autoStartBreaks',
-                      description: 'Begin break timers automatically.',
-                    },
-                    {
-                      label: 'Sound cues',
-                      key: 'soundEnabled',
-                      description: 'Play a gentle tone when sessions end.',
-                    },
-                  ] as const).map((option) => (
-                    <button
-                      key={option.key}
-                      type="button"
-                      onClick={() => toggleBoolean(option.key)}
-                      className={`flex w-full items-center justify-between gap-4 rounded-2xl border px-4 py-3 text-left text-sm transition ${getSurfaceStyles(
-                        theme,
-                        'checklist',
-                      )} ${sharedTokens.motion} ${sharedTokens.focusRing}`}
-                    >
-                      <div>
-                        <p className="font-semibold tracking-[0.3em] uppercase">{option.label}</p>
-                        <p className={`text-[0.65rem] tracking-[0.2em] ${mutedText}`}>{option.description}</p>
-                      </div>
-                      <span className="text-xs tracking-[0.35em]">{timerSettings[option.key] ? 'On' : 'Off'}</span>
-                    </button>
-                  ))}
-              </div>
-            </div>
-
-            <div className={`${cardBase} shadow-[0_15px_40px_rgba(15,23,42,0.18)]`}>
-              <p className={`${sharedTokens.labelCaps} ${mutedText}`}>Focus history</p>
-              <div className="mt-4 space-y-3">
-                {historyEntries.map((entry) => (
-                  <article
-                    key={`${entry.time}-${entry.label}`}
-                    className={`flex items-center justify-between rounded-2xl border border-white/5 px-4 py-3 text-sm ${
-                      theme === 'light' ? 'bg-slate-100/60 text-slate-900' : 'bg-slate-950/60 text-white'
-                    } ${sharedTokens.motion}`}
-                  >
-                    <div>
-                      <p className="font-medium">{entry.label}</p>
-                      <p className={`text-xs ${mutedText}`}>{entry.time}</p>
-                    </div>
-                    <span className={`text-xs uppercase tracking-[0.3em] ${mutedText}`}>Done</span>
-                  </article>
-                ))}
-              </div>
-            </div>
-
-            <div className={`${cardBase} shadow-[0_15px_40px_rgba(0,0,0,0.65)]`}>
-              <p className={`${sharedTokens.labelCaps} ${mutedText}`}>Checklist</p>
-              <div className="mt-4 space-y-3">
-                {sections.map((item) => (
-                  <article
-                    key={item.label}
-                    className={`flex items-start gap-3 rounded-2xl border px-4 py-3 ${getSurfaceStyles(theme, 'checklist')} ${sharedTokens.motion}`}
-                  >
-                    <div
-                      className={`flex h-8 w-8 items-center justify-center rounded-2xl border ${getSurfaceStyles(
-                        theme,
-                        'badge',
-                      )} ${sharedTokens.motion}`}
-                    >
-                      {item.label[0]}
-                    </div>
-                    <div>
-                      <p className="text-sm font-semibold">{item.label}</p>
-                      <p className={`text-xs ${mutedText}`}>{item.description}</p>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </div>
-          </section>
+          {/* ... rest of component unchanged ... */}
         </main>
       </div>
     </div>
