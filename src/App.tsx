@@ -3,6 +3,7 @@ import {
   SetStateAction,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react'
 
@@ -33,6 +34,11 @@ type TimerSettings = {
   soundEnabled: boolean
 }
 
+type StorageValidator<T> = (value: unknown) => value is T
+
+type DurationFieldKey = 'focus' | 'shortBreak' | 'longBreak' | 'sessionsBeforeLongBreak'
+type ToggleFieldKey = 'autoStartFocus' | 'autoStartBreaks' | 'soundEnabled'
+
 type HistoryEntry = {
   label: string
   time: string
@@ -55,8 +61,6 @@ const DEFAULT_HISTORY_ENTRIES: HistoryEntry[] = [
   { label: 'Focus session • 25m', time: 'Today • 9:30 AM', type: 'focus' },
   { label: 'Long break • 15m', time: 'Yesterday • 5:10 PM', type: 'longBreak' },
 ]
-
-type StorageValidator<T> = (value: unknown) => value is T
 
 const isBrowser = typeof window !== 'undefined'
 
@@ -175,8 +179,21 @@ const isHistoryEntryArray = (value: unknown): value is HistoryEntry[] =>
 
 const formatDuration = (minutes: number) => `${String(minutes).padStart(2, '0')}:00`
 
-type DurationFieldKey = 'focus' | 'shortBreak' | 'longBreak' | 'sessionsBeforeLongBreak'
-type ToggleFieldKey = 'autoStartFocus' | 'autoStartBreaks' | 'soundEnabled'
+const formatCountdown = (seconds: number) => {
+  const clamped = Math.max(0, Math.round(seconds))
+  const minutes = Math.floor(clamped / 60)
+  const remainder = clamped % 60
+  return `${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`
+}
+
+type SessionMode = 'focus' | 'shortBreak' | 'longBreak'
+type TimerPhase = 'idle' | 'running' | 'paused' | 'completed'
+
+const sessionModeLabel: Record<SessionMode, string> = {
+  focus: 'Focus',
+  shortBreak: 'Short break',
+  longBreak: 'Long break',
+}
 
 const sharedTokens = {
   motion: 'motion-safe:transition motion-safe:duration-200 motion-safe:ease-out motion-reduce:transition-none',
@@ -214,8 +231,6 @@ const darkSurfaces = {
 const getSurfaceStyles = (theme: 'light' | 'dark', key: keyof typeof lightSurfaces) =>
   theme === 'light' ? lightSurfaces[key] : darkSurfaces[key]
 
-const focusControls = ['Start', 'Pause', 'Reset', 'Skip'] as const
-
 export default function App() {
   const [theme, setTheme] = usePersistedState<'light' | 'dark'>(THEME_KEY, resolvePreferredTheme, isTheme)
   const [timerSettings, setTimerSettings] = usePersistedState<TimerSettings>(
@@ -247,12 +262,6 @@ export default function App() {
   const inputBase = `${sharedTokens.inputBase} ${getSurfaceStyles(theme, 'input')} ${sharedTokens.motion} ${sharedTokens.focusRing}`
 
   const toggleTheme = () => setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))
-
-  const headers = [
-    { label: 'Focus', duration: timerSettings.focus },
-    { label: 'Short break', duration: timerSettings.shortBreak },
-    { label: 'Long break', duration: timerSettings.longBreak },
-  ]
 
   const focusEntries = useMemo(
     () => historyEntries.filter((entry) => entry.type === 'focus'),
@@ -322,6 +331,44 @@ export default function App() {
     }))
   }
 
+  const {
+    mode,
+    timerState,
+    remainingSeconds,
+    durationSeconds,
+    selectMode,
+    start,
+    pause,
+    resume,
+    reset,
+    skip,
+  } = usePomodoroTimer(timerSettings)
+
+  const countdownDisplay = formatCountdown(remainingSeconds)
+  const sessionStateLabel: Record<TimerPhase, string> = {
+    idle: 'Ready to start',
+    running: 'In progress',
+    paused: 'Paused',
+    completed: 'Completed',
+  }
+  const currentStateLabel = sessionStateLabel[timerState]
+  const elapsedPercentage = durationSeconds > 0 ? 1 - remainingSeconds / durationSeconds : 0
+  const elapsedAngle = Math.min(360, Math.max(0, elapsedPercentage * 360))
+
+  const sessionTabs: {
+    mode: SessionMode
+    label: string
+    duration: number
+  }[] = [
+    { mode: 'focus', label: 'Focus session', duration: timerSettings.focus },
+    { mode: 'shortBreak', label: 'Short break', duration: timerSettings.shortBreak },
+    { mode: 'longBreak', label: 'Long break', duration: timerSettings.longBreak },
+  ]
+
+  const primaryActionLabel =
+    timerState === 'paused' ? 'Resume' : timerState === 'running' ? 'Running' : 'Start'
+  const primaryActionHandler = timerState === 'paused' ? resume : start
+
   return (
     <div className={rootClasses}>
       <div className="max-w-6xl mx-auto px-4 py-6 md:py-10 space-y-8">
@@ -382,37 +429,90 @@ export default function App() {
               </div>
             </div>
 
-            <div className="grid grid-cols-3 gap-3">
-              {headers.map((tab) => (
-                <article key={tab.label} className={`${tabBase}`}>
-                  <p className={`${sharedTokens.labelCaps} ${mutedText}`}>{tab.label}</p>
-                  <p className={`text-2xl font-semibold ${theme === 'light' ? 'text-slate-900' : 'text-white'}`}>{formatDuration(tab.duration)}</p>
-                  <span className={badgeClasses}>{cycleLabel}</span>
-                </article>
-              ))}
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+              {sessionTabs.map((tab) => {
+                const isActive = tab.mode === mode
+                return (
+                  <button
+                    key={tab.mode}
+                    type="button"
+                    onClick={() => selectMode(tab.mode)}
+                    className={`flex flex-col rounded-3xl border px-4 py-5 text-left shadow-[0_18px_30px_rgba(15,23,42,0.2)] transition ${sharedTokens.motion} ${isActive ? 'border-white/60 bg-slate-900/80 text-white' : getSurfaceStyles(theme, 'tab')}`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs uppercase tracking-[0.35em] text-slate-400">{sessionModeLabel[tab.mode]}</p>
+                      {isActive && (
+                        <span className="rounded-full bg-white/20 px-3 py-1 text-[0.65rem] font-semibold uppercase tracking-[0.35em] text-white">
+                          Active
+                        </span>
+                      )}
+                    </div>
+                    <p className={`mt-3 text-3xl font-semibold ${isActive ? '' : theme === 'light' ? 'text-slate-900' : 'text-white'}`}>
+                      {formatDuration(tab.duration)}
+                    </p>
+                    <span className={`${sharedTokens.badge} mt-2 ${getSurfaceStyles(theme, 'badge')} ${sharedTokens.motion}`}>{cycleLabel}</span>
+                  </button>
+                )
+              })}
             </div>
 
-            <div className={`${sharedTokens.cardCorners} border border-white/10 p-6 text-center ${getSurfaceStyles(theme, 'card')} ${sharedTokens.motion}`}>
-              <div className={`mx-auto h-[260px] w-[260px] rounded-full border border-white/10 bg-gradient-to-br ${primaryGradient}`}>
-                <span className="sr-only">Circular timer placeholder</span>
+            <div
+              className={`${sharedTokens.cardCorners} border border-white/10 p-6 text-center ${getSurfaceStyles(theme, 'card')} ${sharedTokens.motion}`}
+            >
+              <div className="mx-auto h-[260px] w-[260px] rounded-full border border-white/10 bg-gradient-to-br from-slate-900/40 via-slate-900/70 to-slate-950/80">
+                <div
+                  className="mx-auto mt-4 h-[230px] w-[230px] rounded-full border border-white/10 bg-slate-950/40 shadow-[inset_0_35px_120px_rgba(0,0,0,0.8)]"
+                  style={{
+                    backgroundImage:
+                      durationSeconds > 0
+                        ? `conic-gradient(rgba(255,255,255,0.85) ${elapsedAngle}deg, rgba(15,23,42,0.2) ${elapsedAngle}deg)`
+                        : undefined,
+                  }}
+                >
+                  <div className="flex h-full flex-col items-center justify-center rounded-full bg-slate-950/60 text-center text-white">
+                    <p className="text-xs uppercase tracking-[0.4em] text-white/60">{sessionModeLabel[mode]}</p>
+                    <p className="text-sm uppercase tracking-[0.35em] text-white/60">{currentStateLabel}</p>
+                    <h3 className="text-5xl font-bold tracking-tight">{countdownDisplay}</h3>
+                  </div>
+                </div>
               </div>
               <div className="mt-6 text-left space-y-1">
                 <p className={`${sharedTokens.labelCaps} ${mutedText}`}>Session</p>
-                <h3 className="text-4xl font-bold tracking-tight">21:43</h3>
-                <p className={`text-sm ${mutedText}`}>Next break in {sessionsUntilLongBreak} sessions</p>
+                <p className={`text-sm ${mutedText}`}>Next break in {sessionsUntilLongBreak} session{sessionsUntilLongBreak > 1 ? 's' : ''}</p>
               </div>
             </div>
 
-            <div className={`grid grid-cols-2 gap-3 ${sharedTokens.motion}`}>
-              {focusControls.map((control) => (
-                <button
-                  key={control}
-                  className={`${controlButtonBase} ${getSurfaceStyles(theme, 'button')} ${sharedTokens.motion}`}
-                  type="button"
-                >
-                  {control}
-                </button>
-              ))}
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={primaryActionHandler}
+                disabled={timerState === 'running'}
+                className={`${controlButtonBase} ${getSurfaceStyles(theme, 'button')} ${sharedTokens.motion} ${timerState === 'running' ? 'opacity-60 cursor-not-allowed' : ''}`}
+              >
+                {primaryActionLabel}
+              </button>
+              <button
+                type="button"
+                onClick={pause}
+                disabled={timerState !== 'running'}
+                className={`${controlButtonBase} ${getSurfaceStyles(theme, 'button')} ${sharedTokens.motion} ${timerState !== 'running' ? 'opacity-60 cursor-not-allowed' : ''}`}
+              >
+                Pause
+              </button>
+              <button
+                type="button"
+                onClick={reset}
+                className={`${controlButtonBase} ${getSurfaceStyles(theme, 'button')} ${sharedTokens.motion}`}
+              >
+                Reset
+              </button>
+              <button
+                type="button"
+                onClick={skip}
+                className={`${controlButtonBase} ${getSurfaceStyles(theme, 'button')} ${sharedTokens.motion}`}
+              >
+                Skip
+              </button>
             </div>
           </section>
 
@@ -544,4 +644,167 @@ export default function App() {
       </div>
     </div>
   )
+}
+
+const usePomodoroTimer = (timerSettings: TimerSettings) => {
+  const [mode, setMode] = useState<SessionMode>('focus')
+  const [timerState, setTimerState] = useState<TimerPhase>('idle')
+  const [endAt, setEndAt] = useState<number | null>(null)
+  const [pausedSeconds, setPausedSeconds] = useState<number | null>(null)
+  const [tick, setTick] = useState(() => Date.now())
+  const intervalRef = useRef<number | null>(null)
+  const focusCycleRef = useRef(0)
+
+  const sessionDurations = useMemo(
+    () => ({
+      focus: Math.max(60, Math.round(timerSettings.focus * 60)),
+      shortBreak: Math.max(60, Math.round(timerSettings.shortBreak * 60)),
+      longBreak: Math.max(60, Math.round(timerSettings.longBreak * 60)),
+    }),
+    [timerSettings.focus, timerSettings.shortBreak, timerSettings.longBreak],
+  )
+
+  const durationSeconds = sessionDurations[mode]
+  const isRunning = timerState === 'running'
+
+  useEffect(() => {
+    if (!isBrowser) {
+      return
+    }
+
+    if (!isRunning) {
+      if (intervalRef.current) {
+        window.clearInterval(intervalRef.current)
+        intervalRef.current = null
+      }
+      return
+    }
+
+    intervalRef.current = window.setInterval(() => {
+      setTick(Date.now())
+    }, 250)
+
+    return () => {
+      if (intervalRef.current) {
+        window.clearInterval(intervalRef.current)
+        intervalRef.current = null
+      }
+    }
+  }, [isRunning])
+
+  useEffect(() => {
+    if (!isRunning || endAt === null) {
+      return
+    }
+
+    if (Date.now() >= endAt) {
+      setTimerState('completed')
+      setEndAt(null)
+      setPausedSeconds(null)
+    }
+  }, [endAt, isRunning, tick])
+
+  useEffect(() => {
+    const maxActiveFocuses = Math.max(0, timerSettings.sessionsBeforeLongBreak - 1)
+    if (focusCycleRef.current > maxActiveFocuses) {
+      focusCycleRef.current = maxActiveFocuses
+    }
+  }, [timerSettings.sessionsBeforeLongBreak])
+
+  const remainingSeconds = useMemo(() => {
+    if (timerState === 'running' && endAt !== null) {
+      return Math.max(0, Math.round((endAt - tick) / 1000))
+    }
+
+    if (timerState === 'paused' && pausedSeconds !== null) {
+      return pausedSeconds
+    }
+
+    if (timerState === 'completed') {
+      return 0
+    }
+
+    return durationSeconds
+  }, [timerState, endAt, tick, pausedSeconds, durationSeconds])
+
+  const pickNextMode = (): SessionMode => {
+    if (mode !== 'focus') {
+      return 'focus'
+    }
+
+    const nextFocusCount = focusCycleRef.current + 1
+    if (nextFocusCount >= timerSettings.sessionsBeforeLongBreak) {
+      focusCycleRef.current = 0
+      return 'longBreak'
+    }
+
+    focusCycleRef.current = nextFocusCount
+    return 'shortBreak'
+  }
+
+  const selectMode = (selectedMode: SessionMode) => {
+    setMode(selectedMode)
+    setTimerState('idle')
+    setEndAt(null)
+    setPausedSeconds(null)
+  }
+
+  const start = () => {
+    if (timerState === 'running') {
+      return
+    }
+
+    const now = Date.now()
+    setEndAt(now + durationSeconds * 1000)
+    setPausedSeconds(null)
+    setTimerState('running')
+    setTick(now)
+  }
+
+  const pause = () => {
+    if (timerState !== 'running' || endAt === null) {
+      return
+    }
+
+    const nextRemaining = Math.max(0, Math.round((endAt - Date.now()) / 1000))
+    setPausedSeconds(nextRemaining)
+    setEndAt(null)
+    setTimerState('paused')
+  }
+
+  const resume = () => {
+    if (timerState !== 'paused' || pausedSeconds === null) {
+      return
+    }
+
+    const now = Date.now()
+    setEndAt(now + pausedSeconds * 1000)
+    setPausedSeconds(null)
+    setTimerState('running')
+    setTick(now)
+  }
+
+  const reset = () => {
+    setTimerState('idle')
+    setEndAt(null)
+    setPausedSeconds(null)
+  }
+
+  const skip = () => {
+    const nextMode = pickNextMode()
+    selectMode(nextMode)
+  }
+
+  return {
+    mode,
+    timerState,
+    remainingSeconds,
+    durationSeconds,
+    selectMode,
+    start,
+    pause,
+    resume,
+    reset,
+    skip,
+  }
 }
