@@ -8,15 +8,6 @@ import {
   useState,
 } from 'react'
 
-const sections = [
-  { label: 'Current task', description: 'Define a quick task to focus on for this session.' },
-  { label: 'Session tabs', description: 'Focus / Short break / Long break overview.' },
-  { label: 'Timer', description: 'Large circular timer with remaining time and countdown.' },
-  { label: 'Controls', description: 'Start, pause, skip, and reset actions.' },
-  { label: 'Progress snapshot', description: 'Pomodoro cycle progress and streaks.' },
-  { label: 'History & stats', description: 'Session history timeline and metrics.' },
-]
-
 const THEME_KEY = 'pomodoro_theme'
 const TIMER_SETTINGS_KEY = 'pomodoro_timer_settings'
 const CURRENT_TASK_KEY = 'pomodoro_current_task'
@@ -45,7 +36,7 @@ type HistoryEntry = {
 }
 
 type SessionMode = 'focus' | 'shortBreak' | 'longBreak'
-type TimerPhase = 'idle' | 'running' | 'paused' | 'completed'
+type TimerPhase = 'idle' | 'running' | 'paused' | 'completed' | 'nextSession'
 
 type PersistedTimerState = {
   mode: SessionMode
@@ -184,7 +175,11 @@ const isTimerSettings = (value: unknown): value is TimerSettings => {
 }
 
 const isTimerPhase = (value: unknown): value is TimerPhase =>
-  value === 'idle' || value === 'running' || value === 'paused' || value === 'completed'
+  value === 'idle' ||
+  value === 'running' ||
+  value === 'paused' ||
+  value === 'completed' ||
+  value === 'nextSession'
 
 const isPersistedTimerState = (value: unknown): value is PersistedTimerState => {
   if (!isObject(value)) {
@@ -220,23 +215,76 @@ const readPersistedTimerState = (): PersistedTimerState =>
     readLocalValue(TIMER_STATE_KEY, getFallbackTimerState, isPersistedTimerState),
   )
 
+const formatTime = (milliseconds: number) => {
+  const totalSeconds = Math.ceil(milliseconds / 1000)
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+}
+
+const getSessionDurationMs = (mode: SessionMode, settings: TimerSettings) => {
+  switch (mode) {
+    case 'focus':
+      return settings.focus * 60 * 1000
+    case 'shortBreak':
+      return settings.shortBreak * 60 * 1000
+    case 'longBreak':
+      return settings.longBreak * 60 * 1000
+  }
+}
+
+const stateCopy: Record<TimerPhase, { headline: string; description: string }> = {
+  idle: {
+    headline: 'Ready to focus',
+    description: 'Set your intention and kick off the session when you are ready.',
+  },
+  running: {
+    headline: 'Focus in progress',
+    description: 'Stay calm. Breathe. The countdown is steady and drift-free.',
+  },
+  paused: {
+    headline: 'Session paused',
+    description: 'You can resume without losing your progress.',
+  },
+  completed: {
+    headline: 'Session complete',
+    description: 'Reflect briefly before you move into the next session.',
+  },
+  nextSession: {
+    headline: 'Next session queued',
+    description: 'You are set for the upcoming rhythm — start when you are ready.',
+  },
+}
+
+const determineNextMode = (
+  current: SessionMode,
+  focusStreak: number,
+  sessionsBeforeLongBreak: number,
+): SessionMode => {
+  if (current === 'focus') {
+    const nextStreak = focusStreak + 1
+    return nextStreak >= sessionsBeforeLongBreak ? 'longBreak' : 'shortBreak'
+  }
+  return 'focus'
+}
+
 export default function App() {
   const [theme, setTheme] = usePersistedState<'light' | 'dark'>(
     THEME_KEY,
     resolvePreferredTheme,
     isTheme,
   )
-  const [timerSettings, setTimerSettings] = usePersistedState<TimerSettings>(
+  const [timerSettings] = usePersistedState<TimerSettings>(
     TIMER_SETTINGS_KEY,
     () => ({ ...DEFAULT_TIMER_SETTINGS }),
     isTimerSettings,
   )
-  const [currentTask, setCurrentTask] = usePersistedState<string>(
+  const [currentTask] = usePersistedState<string>(
     CURRENT_TASK_KEY,
     () => '',
     (value): value is string => typeof value === 'string',
   )
-  const [historyEntries, setHistoryEntries] = usePersistedState<HistoryEntry[]>(
+  const [historyEntries] = usePersistedState<HistoryEntry[]>(
     HISTORY_KEY,
     () => DEFAULT_HISTORY_ENTRIES,
     isHistoryEntryArray,
@@ -246,11 +294,160 @@ export default function App() {
     document.documentElement.dataset.theme = theme
   }, [theme])
 
+  const [sessionMode, setSessionMode] = useState<SessionMode>('focus')
+  const [timerPhase, setTimerPhase] = useState<TimerPhase>('idle')
+  const [remainingMs, setRemainingMs] = useState(() => getSessionDurationMs('focus', timerSettings))
+  const [pausedMs, setPausedMs] = useState<number | null>(null)
+  const [focusStreak, setFocusStreak] = useState(0)
+  const [pendingNextMode, setPendingNextMode] = useState<SessionMode>('focus')
+
+  const timerIntervalRef = useRef<number | null>(null)
+  const targetEndRef = useRef<number | null>(null)
+
+  const sessionDurationMs = useMemo(() => getSessionDurationMs(sessionMode, timerSettings), [sessionMode, timerSettings])
+
+  useEffect(() => {
+    if (timerPhase === 'idle' || timerPhase === 'nextSession') {
+      setRemainingMs(sessionDurationMs)
+      setPausedMs(null)
+    }
+  }, [sessionDurationMs, timerPhase])
+
+  useEffect(() => {
+    if (timerPhase !== 'running') {
+      if (timerIntervalRef.current) {
+        window.clearInterval(timerIntervalRef.current)
+        timerIntervalRef.current = null
+      }
+      return
+    }
+
+    timerIntervalRef.current = window.setInterval(() => {
+      const now = Date.now()
+      const target = targetEndRef.current ?? now
+      const difference = Math.max(0, target - now)
+      setRemainingMs(difference)
+      if (difference <= 0) {
+        window.clearInterval(timerIntervalRef.current!) 
+        timerIntervalRef.current = null
+        handleCompletion()
+      }
+    }, 250)
+
+    return () => {
+      if (timerIntervalRef.current) {
+        window.clearInterval(timerIntervalRef.current)
+        timerIntervalRef.current = null
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timerPhase])
+
+  const handleCompletion = useCallback(() => {
+    setTimerPhase('completed')
+    setRemainingMs(0)
+    targetEndRef.current = null
+
+    setPendingNextMode((prev) => {
+      const nextMode = determineNextMode(sessionMode, focusStreak, timerSettings.sessionsBeforeLongBreak)
+      if (sessionMode === 'focus') {
+        const nextStreak = focusStreak + 1
+        if (nextMode === 'longBreak') {
+          setFocusStreak(0)
+        } else {
+          setFocusStreak(nextStreak)
+        }
+      }
+      return nextMode
+    })
+  }, [focusStreak, sessionMode, timerSettings.sessionsBeforeLongBreak])
+
+  const startTimer = useCallback(() => {
+    if (timerPhase === 'running') {
+      return
+    }
+    const duration = timerPhase === 'paused' && pausedMs !== null ? pausedMs : remainingMs
+    const endAt = Date.now() + Math.max(0, duration)
+    targetEndRef.current = endAt
+    setTimerPhase('running')
+    setPausedMs(null)
+    setRemainingMs(Math.max(0, duration))
+  }, [pausedMs, remainingMs, timerPhase])
+
+  const pauseTimer = () => {
+    if (timerPhase !== 'running') {
+      return
+    }
+    const now = Date.now()
+    const remaining = Math.max(0, (targetEndRef.current ?? now) - now)
+    targetEndRef.current = null
+    window.clearInterval(timerIntervalRef.current!) 
+    timerIntervalRef.current = null
+    setPausedMs(remaining)
+    setRemainingMs(remaining)
+    setTimerPhase('paused')
+  }
+
+  const resetTimer = () => {
+    if (timerIntervalRef.current) {
+      window.clearInterval(timerIntervalRef.current)
+      timerIntervalRef.current = null
+    }
+    targetEndRef.current = null
+    setPausedMs(null)
+    setRemainingMs(sessionDurationMs)
+    setTimerPhase('idle')
+  }
+
+  const prepareNextSession = () => {
+    setSessionMode(pendingNextMode)
+    setRemainingMs(getSessionDurationMs(pendingNextMode, timerSettings))
+    setTimerPhase('nextSession')
+  }
+
+  const status = stateCopy[timerPhase]
+  const primaryButton = useMemo(() => {
+    switch (timerPhase) {
+      case 'running':
+        return { label: 'Pause session', action: pauseTimer }
+      case 'paused':
+        return { label: 'Resume session', action: startTimer }
+      case 'completed':
+        return { label: 'Next session', action: prepareNextSession }
+      default:
+        return { label: 'Start session', action: startTimer }
+    }
+  }, [timerPhase, pauseTimer, startTimer])
+
+  const activeState = timerPhase === 'running' || timerPhase === 'paused'
+  const progress = sessionDurationMs === 0 ? 0 : 1 - remainingMs / sessionDurationMs
+  const progressDegrees = Math.min(360, Math.max(0, progress * 360))
+
+  const statusBadgeStyles = {
+    idle: 'bg-sky-500/10 text-sky-400',
+    running: 'bg-emerald-500/10 text-emerald-300',
+    paused: 'bg-amber-500/10 text-amber-300',
+    completed: 'bg-purple-500/10 text-purple-300',
+    nextSession: 'bg-slate-500/10 text-slate-200',
+  }
+
+  const circleBackground = `conic-gradient(rgba(16,185,129,0.65) ${progressDegrees}deg, rgba(15,23,42,0.2) ${progressDegrees}deg)`
+
   const rootClasses = `${getSurfaceStyles(theme, 'shell')} min-h-screen ${sharedTokens.motion}`
   const mutedText = theme === 'light' ? 'text-slate-500' : 'text-slate-400'
 
-  const toggleTheme = () => setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))
-  const themeLabel = theme === 'light' ? 'Premium light' : 'Premium dark'
+  const timerLabel = useMemo(() => {
+    switch (sessionMode) {
+      case 'focus':
+        return 'Focus session'
+      case 'shortBreak':
+        return 'Short break'
+      case 'longBreak':
+        return 'Long break'
+      default:
+        return 'Session'
+    }
+  }, [sessionMode])
 
   return (
     <div className={rootClasses}>
@@ -265,35 +462,118 @@ export default function App() {
             <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Theme</p>
             <button
               type="button"
-              onClick={toggleTheme}
+              onClick={() => setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))}
               aria-pressed={theme === 'dark'}
               aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
               className={`${sharedTokens.motion} ${sharedTokens.focusRing} group relative inline-flex items-center gap-2 rounded-full border border-white/10 bg-gradient-to-r from-slate-800 via-slate-900 to-slate-900 px-4 py-2 shadow-lg shadow-slate-950/30 text-sm font-semibold uppercase tracking-[0.35em]`}
             >
-              <span className="text-white">{themeLabel}</span>
-              <span
-                className={`${sharedTokens.motion} inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/30 bg-slate-50 text-slate-900 transition-transform duration-200 group-aria-pressed:translate-x-0`}
-              >
+              <span className="text-white">{theme === 'light' ? 'Premium light' : 'Premium dark'}</span>
+              <span className={`${sharedTokens.motion} inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/30 bg-slate-50 text-slate-900 transition-transform duration-200 group-aria-pressed:translate-x-0`}>
                 {theme === 'light' ? '☀' : '☾'}
               </span>
             </button>
           </div>
         </header>
 
-        <main className="grid grid-cols-1 gap-6 md:grid-cols-2">
-          {sections.map(({ label, description }) => (
-            <section
-              key={label}
-              className={`${sharedTokens.cardCorners} ${sharedTokens.cardPadding} ${getSurfaceStyles(theme, 'card')} ${sharedTokens.motion}`}
-            >
-              <h2 className="text-lg font-semibold">{label}</h2>
-              <p className={`text-sm ${mutedText}`}>{description}</p>
-            </section>
-          ))}
+        <main className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+          <section
+            className={`${sharedTokens.cardCorners} ${sharedTokens.cardPadding} ${getSurfaceStyles(theme, 'card')} ${sharedTokens.motion}`}
+          >
+            <div className="flex flex-col gap-6">
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.4em] text-slate-400">{timerLabel}</p>
+                    <h2 className="text-2xl font-semibold">{status.headline}</h2>
+                  </div>
+                  <span
+                    className={`rounded-full border border-white/20 px-3 py-1 text-xs font-semibold uppercase tracking-[0.3em] ${statusBadgeStyles[timerPhase]}`}
+                  >
+                    {timerPhase.replace(/([A-Z])/g, ' $1').toUpperCase()}
+                  </span>
+                </div>
+                <p className={`text-sm ${mutedText}`}>{status.description}</p>
+                <p className="sr-only" aria-live="polite">
+                  Timer status: {timerPhase}
+                </p>
+              </div>
+
+              <div className="flex flex-col items-center gap-4 md:flex-row md:items-end md:justify-between">
+                <div
+                  className={`relative flex h-64 w-64 items-center justify-center rounded-[50%] border border-white/10 ${activeState ? 'shadow-[0_15px_70px_rgba(14,165,233,0.35)]' : 'shadow-[0_0_30px_rgba(15,23,42,0.35)]'} ${sharedTokens.motion}`}
+                >
+                  <div
+                    className="absolute inset-0 rounded-[50%]"
+                    style={{ background: circleBackground }}
+                    aria-hidden
+                  />
+                  <div className="relative flex flex-col items-center justify-center text-center">
+                    <p className="text-xs uppercase tracking-[0.4em] text-slate-400">Remaining</p>
+                    <p className="text-5xl font-semibold tabular-nums">{formatTime(remainingMs)}</p>
+                    <p className="text-sm text-slate-400">{sessionDurationMs / 60000} min session</p>
+                  </div>
+                </div>
+
+                <div className="flex flex-1 flex-col gap-3">
+                  <button
+                    type="button"
+                    onClick={primaryButton.action}
+                    aria-label={primaryButton.label}
+                    className={`${sharedTokens.motion} ${sharedTokens.focusRing} rounded-2xl border border-white/0 bg-gradient-to-r from-sky-500 via-sky-600 to-sky-700 px-6 py-4 text-lg font-semibold uppercase tracking-[0.4em] text-white shadow-lg shadow-sky-500/40 transition hover:scale-[1.01] active:translate-y-px`}
+                  >
+                    {primaryButton.label}
+                  </button>
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={resetTimer}
+                      className={`${sharedTokens.motion} ${sharedTokens.focusRing} flex-1 rounded-2xl border border-white/20 px-4 py-3 text-sm font-semibold uppercase tracking-[0.4em] text-slate-200 backdrop-blur`}
+                    >
+                      Reset
+                    </button>
+                    <button
+                      type="button"
+                      onClick={prepareNextSession}
+                      aria-label="Prepare next session"
+                      className={`${sharedTokens.motion} ${sharedTokens.focusRing} flex-1 rounded-2xl border border-slate-500/70 px-4 py-3 text-sm font-semibold uppercase tracking-[0.4em] text-slate-100`}
+                    >
+                      Next session
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section
+            className={`${sharedTokens.cardCorners} ${sharedTokens.cardPadding} ${getSurfaceStyles(theme, 'card')} ${sharedTokens.motion}`}
+          >
+            <div className="space-y-4">
+              <h3 className="text-lg font-semibold">Cycle snapshot</h3>
+              <p className={`text-sm ${mutedText}`}>You have {focusStreak} completed focus {focusStreak === 1 ? 'session' : 'sessions'} in this streak.</p>
+              <div className="rounded-2xl border border-white/10 bg-slate-900/40 p-4">
+                <p className="text-xs uppercase tracking-[0.3em] text-slate-400">Upcoming session</p>
+                <p className="text-2xl font-semibold">{timerPhase === 'completed' ? pendingNextMode : sessionMode}</p>
+                <p className={`text-sm ${mutedText}`}>Duration: {timerSettings[pendingNextMode]} min</p>
+              </div>
+              <div className="space-y-3">
+                <h4 className="text-xs uppercase tracking-[0.3em] text-slate-400">Recent history</h4>
+                <ul className="space-y-2 text-sm">
+                  {historyEntries.slice(0, 3).map((entry) => (
+                    <li key={entry.time} className="flex items-center justify-between">
+                      <div>
+                        <p className="font-semibold">{entry.label}</p>
+                        <p className={`text-xs uppercase tracking-[0.3em] ${mutedText}`}>{entry.time}</p>
+                      </div>
+                      <span className="text-xs uppercase tracking-[0.3em] text-slate-400">{entry.type}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          </section>
         </main>
       </div>
     </div>
   )
 }
-
-// Note: Pomodoro timer hook and TimerCenterpiece components omitted for brevity; implement as needed
