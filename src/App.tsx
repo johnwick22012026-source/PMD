@@ -300,6 +300,29 @@ const formatDurationLabel = (milliseconds: number) => {
   return `${minutes}m`
 }
 
+const isSameLocalDay = (a: Date, b: Date) =>
+  a.getFullYear() === b.getFullYear() &&
+  a.getMonth() === b.getMonth() &&
+  a.getDate() === b.getDate()
+
+const formatEntryTime = (iso: string) => {
+  try {
+    const date = new Date(iso)
+    return date.toLocaleTimeString(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  } catch {
+    return '—'
+  }
+}
+
+const historyBadgeStyles: Record<HistoryEntry['type'], string> = {
+  focus: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200',
+  shortBreak: 'bg-sky-100 text-sky-700 dark:bg-sky-900 dark:text-sky-200',
+  longBreak: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900 dark:text-indigo-200',
+}
+
 export default function App() {
   const notificationSupported = useMemo(() => notificationApiAvailable(), [])
 
@@ -678,6 +701,25 @@ export default function App() {
     },
   ]
 
+  const today = new Date()
+  const todayHistory = useMemo(() => {
+    const filtered = history.filter(entry => {
+      try {
+        const entryDate = new Date(entry.time)
+        return isSameLocalDay(entryDate, today)
+      } catch {
+        return false
+      }
+    })
+    return filtered.sort((a, b) => {
+      const aTime = new Date(a.time).getTime()
+      const bTime = new Date(b.time).getTime()
+      return bTime - aTime
+    })
+  }, [history, today])
+
+  const historyEmpty = todayHistory.length === 0
+
   const rootClasses = `${getSurfaceStyles(theme)} min-h-screen flex flex-col ${sharedTokens.motion}`
 
   const handleTaskSubmit = useCallback(
@@ -820,6 +862,58 @@ export default function App() {
               ))}
             </div>
           </section>
+          <section className="rounded-3xl border border-slate-200 bg-white/80 dark:border-slate-700 dark:bg-slate-900/70 px-5 py-6 shadow-lg shadow-slate-400/10">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-[0.4em] text-slate-400 dark:text-slate-500">Timeline</p>
+                <h3 id="session-history-heading" className="text-xl font-semibold text-slate-900 dark:text-slate-50">
+                  Today's session history
+                </h3>
+              </div>
+              <span className="text-xs font-mono tracking-[0.2em] text-slate-400 dark:text-slate-500">
+                {today.toLocaleDateString()}
+              </span>
+            </div>
+            <div
+              className="mt-6 flex flex-col gap-3"
+              aria-live="polite"
+              aria-labelledby="session-history-heading"
+            >
+              {historyEmpty ? (
+                <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-6 text-center text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-400">
+                  <p className="font-semibold text-slate-900 dark:text-slate-50">No sessions yet</p>
+                  <p className="text-[0.75rem]">Start your first focus session to build today's story.</p>
+                </div>
+              ) : (
+                <ol className="space-y-3">
+                  {todayHistory.map(entry => (
+                    <li key={`${entry.type}-${entry.time}`} className="flex gap-3 rounded-2xl border border-slate-100 bg-slate-50/80 p-4 text-slate-900 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-50">
+                      <span
+                        className={`mt-1 inline-flex h-3 w-3 flex-shrink-0 rounded-full ${historyBadgeStyles[entry.type]}`}
+                        aria-hidden="true"
+                      />
+                      <div className="flex flex-1 flex-col gap-1">
+                        <div className="flex items-baseline justify-between gap-2">
+                          <p className="text-sm font-semibold uppercase tracking-[0.3em] text-slate-500 dark:text-slate-400">
+                            {entry.label}
+                          </p>
+                          <time className="text-xs font-mono tracking-[0.3em] text-slate-400 dark:text-slate-500">
+                            {formatEntryTime(entry.time)}
+                          </time>
+                        </div>
+                        <p className="text-xs uppercase tracking-[0.3em] text-slate-400 dark:text-slate-500">
+                          Duration: {entry.durationMs ? formatDurationLabel(entry.durationMs) : '—'}
+                        </p>
+                        <p className="text-[0.75rem] text-slate-600 dark:text-slate-300">
+                          Completed successfully
+                        </p>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </div>
+          </section>
           <section className="flex flex-col items-center gap-4">
             <h2 className="text-2xl font-semibold">{timerLabel} Session</h2>
             <div className="text-6xl font-mono">{formatTime(remainingMs)}</div>
@@ -827,7 +921,7 @@ export default function App() {
               className={`
                 ${completionPanelMotionClass}
                 ${completionPanelVisible ? 'opacity-100 translate-y-0 pointer-events-auto' : 'opacity-0 translate-y-2 pointer-events-none'}
-                relative w-full max-w-md rounded-2xl border border-white/40 bg-white/90 dark:bg-slate-900/80 dark;border-slate-700/80 p-6 flex flex-col gap-3 shadow-lg
+                relative w-full max-w-md rounded-2xl border border-white/40 bg-white/90 dark:bg-slate-900/80 dark:border-slate-700/80 p-6 flex flex-col gap-3 shadow-lg
               `}
               aria-live="polite"
               role="status"
