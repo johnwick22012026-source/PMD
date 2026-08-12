@@ -63,6 +63,17 @@ type PersistedTimerState = {
   completionToken?: string
 }
 
+type SafeStorage = {
+  getItem(key: string): string | null
+  setItem(key: string, value: string): void
+  removeItem(key: string): void
+  isAvailable: boolean
+}
+
+type SafeAudioPlayer = {
+  play: () => void
+}
+
 const TIMER_SESSIONS: TimerSession[] = ['focus', 'shortBreak', 'longBreak']
 const TIMER_STATUSES: TimerStatus[] = ['IDLE', 'RUNNING', 'PAUSED']
 
@@ -171,6 +182,107 @@ const isTimerSettings: StorageValidator<TimerSettings> = (value): value is Timer
   )
 }
 
+// Resilient storage helpers
+const memoryStorage: Record<string, string> = {}
+
+const safeStorage: SafeStorage = (() => {
+  let available = false
+  if (typeof window !== 'undefined') {
+    try {
+      const testKey = '__pomodoro_storage_test__'
+      window.localStorage.setItem(testKey, '1')
+      window.localStorage.removeItem(testKey)
+      available = true
+    } catch {
+      available = false
+    }
+  }
+
+  return {
+    isAvailable: available,
+    getItem(key: string) {
+      if (available) {
+        try {
+          return window.localStorage.getItem(key)
+        } catch {
+          // Fall through to memory storage
+        }
+      }
+      return memoryStorage[key] ?? null
+    },
+    setItem(key: string, value: string) {
+      if (available) {
+        try {
+          window.localStorage.setItem(key, value)
+          return
+        } catch {
+          // degrade to memory storage
+        }
+      }
+      memoryStorage[key] = value
+    },
+    removeItem(key: string) {
+      if (available) {
+        try {
+          window.localStorage.removeItem(key)
+          return
+        } catch {
+          // degrade to memory storage
+        }
+      }
+      delete memoryStorage[key]
+    },
+  }
+})()
+
+const canShowNotifications = () =>
+  typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted'
+
+const showBrowserNotification = (title: string, options?: NotificationOptions) => {
+  if (!canShowNotifications()) return
+  try {
+    new Notification(title, { silent: true, ...options })
+  } catch {
+    // ignore notification delivery failures
+  }
+}
+
+const createSafeAudioPlayer = (): SafeAudioPlayer | null => {
+  if (typeof window === 'undefined') return null
+  const extendedWindow = window as Window & {
+    AudioContext?: typeof AudioContext
+    webkitAudioContext?: typeof AudioContext
+  }
+  const AudioConstructor = extendedWindow.AudioContext ?? extendedWindow.webkitAudioContext
+  if (!AudioConstructor) return null
+
+  try {
+    const context = new AudioConstructor()
+    const resumeContext = () => {
+      if (context.state === 'suspended') {
+        context.resume().catch(() => {})
+      }
+    }
+
+    return {
+      play() {
+        resumeContext()
+        const oscillator = context.createOscillator()
+        const gain = context.createGain()
+        oscillator.type = 'sine'
+        oscillator.frequency.setValueAtTime(520, context.currentTime)
+        gain.gain.setValueAtTime(0.18, context.currentTime)
+        oscillator.connect(gain)
+        gain.connect(context.destination)
+        oscillator.start()
+        oscillator.stop(context.currentTime + 0.15)
+      },
+    }
+  } catch {
+    return null
+  }
+}
+
 const usePrefersReducedMotion = () => {
   const [prefersReduced, setPrefersReduced] = useState(false)
 
@@ -194,16 +306,20 @@ const usePersistedState = <T,>(
   validator?: StorageValidator<T>,
 ): [T, Dispatch<SetStateAction<T>>] => {
   const [state, setState] = useState<T>(() => {
-    if (typeof window === 'undefined') {
+    if (!safeStorage.isAvailable && typeof window === 'undefined') {
       return defaultValue()
     }
 
     try {
-      const stored = window.localStorage.getItem(key)
+      const stored = safeStorage.getItem(key)
       if (stored) {
         const parsed: unknown = JSON.parse(stored)
-        if (!validator || validator(parsed)) {
-          return parsed
+        if (validator) {
+          if (validator(parsed)) {
+            return parsed
+          }
+        } else {
+          return parsed as T
         }
       }
     } catch {
@@ -214,9 +330,8 @@ const usePersistedState = <T,>(
   })
 
   useEffect(() => {
-    if (typeof window === 'undefined') return
     try {
-      window.localStorage.setItem(key, JSON.stringify(state))
+      safeStorage.setItem(key, JSON.stringify(state))
     } catch {
       // ignore storage write failures
     }
@@ -324,6 +439,12 @@ export default function App() {
   }, [setTimerSettings])
 
   const completionGuardRef = useRef<string | null>(null)
+  const audioPlayerRef = useRef<SafeAudioPlayer | null>(null)
+  const previousSessionRef = useRef<TimerSession>('focus')
+
+  useEffect(() => {
+    audioPlayerRef.current = createSafeAudioPlayer()
+  }, [])
 
   const completeSessionState = useCallback(
     (state: TimerState, now: number): TimerState | null => {
@@ -359,10 +480,8 @@ export default function App() {
   )
 
   const hydrateTimerFromStorage = useCallback(() => {
-    if (typeof window === 'undefined') return
-
     try {
-      const stored = window.localStorage.getItem(TIMER_STATE_KEY)
+      const stored = safeStorage.getItem(TIMER_STATE_KEY)
       if (!stored) {
         setTimerState(prev => buildIdleState(prev.session, prev.cycleCount, timerSettings))
         return
@@ -428,18 +547,17 @@ export default function App() {
         cycleCount,
         completionToken,
       })
-    } catch (error) {
-      // Reset to safe state when parsing fails
+    } catch {
       setTimerState(prev => buildIdleState(prev.session, prev.cycleCount, timerSettings))
     }
-  }, [timerSettings, completeSessionState])
+  }, [completeSessionState, timerSettings])
 
   useEffect(() => {
     hydrateTimerFromStorage()
   }, [hydrateTimerFromStorage])
 
   useEffect(() => {
-    if (typeof window === 'undefined') return
+    if (!safeStorage.isAvailable || typeof window === 'undefined') return
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
         hydrateTimerFromStorage()
@@ -451,9 +569,20 @@ export default function App() {
   }, [hydrateTimerFromStorage])
 
   useEffect(() => {
-    if (typeof window === 'undefined') return
+    if (!safeStorage.isAvailable || typeof window === 'undefined') return
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === TIMER_STATE_KEY) {
+        hydrateTimerFromStorage()
+      }
+    }
+
+    window.addEventListener('storage', handleStorage)
+    return () => window.removeEventListener('storage', handleStorage)
+  }, [hydrateTimerFromStorage])
+
+  useEffect(() => {
     try {
-      window.localStorage.setItem(TIMER_STATE_KEY, JSON.stringify(timerState))
+      safeStorage.setItem(TIMER_STATE_KEY, JSON.stringify(timerState))
     } catch {
       // ignore storage write failures
     }
@@ -500,6 +629,37 @@ export default function App() {
   }, [completeSessionState])
 
   useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.repeat) return
+      const key = event.key.toLowerCase()
+      if (key === ' ' || key === 'spacebar') {
+        event.preventDefault()
+        setTimerState(prev => {
+          if (prev.status === 'RUNNING') {
+            pauseTimer()
+            return prev
+          }
+          startOrResumeTimer()
+          return prev
+        })
+        return
+      }
+
+      if (key === 'r') {
+        resetTimer()
+        return
+      }
+
+      if (key === 's') {
+        skipTimer()
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [pauseTimer, resetTimer, skipTimer, startOrResumeTimer])
+
+  useEffect(() => {
     if (timerState.status !== 'RUNNING') return
 
     const interval = window.setInterval(() => {
@@ -531,6 +691,28 @@ export default function App() {
         return 'Focus'
     }
   }, [timerState.session])
+
+  useEffect(() => {
+    if (previousSessionRef.current === timerState.session) return
+    previousSessionRef.current = timerState.session
+
+    if (timerSettings.soundEnabled) {
+      try {
+        audioPlayerRef.current?.play()
+      } catch {
+        // fail silently when audio playback is blocked
+      }
+    }
+
+    const notificationBody =
+      timerState.session === 'focus'
+        ? 'Refocus on your priority task and keep the momentum going.'
+        : 'Pause, breathe, and enjoy a well-earned break.'
+
+    showBrowserNotification(`${timerLabel} session started`, {
+      body: notificationBody,
+    })
+  }, [timerLabel, timerSettings.soundEnabled, timerState.session])
 
   const progressPercent = useMemo(() => {
     if (timerState.durationMs <= 0) return 0
