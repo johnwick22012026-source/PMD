@@ -120,7 +120,22 @@ const darkSurfaces = {
 const getSurfaceStyles = (theme: 'light' | 'dark') =>
   theme === 'light' ? lightSurfaces.shell : darkSurfaces.shell
 
-const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null
+
+const isTheme = (value: unknown): value is 'light' | 'dark' =>
+  value === 'light' || value === 'dark'
+
+// Strongly validate that loaded settings match the TimerSettings shape
+const isTimerSettings = (value: unknown): value is TimerSettings =>
+  isObject(value) &&
+  typeof (value as any).focus === 'number' &&
+  typeof (value as any).shortBreak === 'number' &&
+  typeof (value as any).longBreak === 'number' &&
+  typeof (value as any).sessionsBeforeLongBreak === 'number' &&
+  typeof (value as any).autoStartFocus === 'boolean' &&
+  typeof (value as any).autoStartBreaks === 'boolean' &&
+  typeof (value as any).soundEnabled === 'boolean'
 
 const readLocalValue = <T,>(
   key: string,
@@ -166,8 +181,6 @@ const usePersistedState = <T,>(
   return [state, setState]
 }
 
-const isTheme = (value: unknown): value is 'light' | 'dark' => value === 'light' || value === 'dark'
-
 const resolvePreferredTheme = (): 'light' | 'dark' => {
   if (!isBrowser) return 'dark'
   return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
@@ -177,8 +190,8 @@ const isPersistedTimerState = (value: unknown): value is PersistedTimerState =>
   isObject(value) &&
   ['focus', 'shortBreak', 'longBreak'].includes((value as any).mode) &&
   ['idle', 'running', 'paused', 'completed', 'nextSession'].includes((value as any).timerState) &&
-  (value as any).endAt === null || typeof (value as any).endAt === 'number' && Number.isFinite((value as any).endAt) &&
-  (value as any).pausedRemainingMs === null || typeof (value as any).pausedRemainingMs === 'number'
+  ((value as any).endAt === null || (typeof (value as any).endAt === 'number' && Number.isFinite((value as any).endAt))) &&
+  ((value as any).pausedRemainingMs === null || typeof (value as any).pausedRemainingMs === 'number')
 
 const getFallbackTimerState = (): PersistedTimerState => ({
   mode: 'focus',
@@ -250,7 +263,7 @@ export default function App() {
   const [timerSettings] = usePersistedState<TimerSettings>(
     TIMER_SETTINGS_KEY,
     () => DEFAULT_TIMER_SETTINGS,
-    (v): v is TimerSettings => typeof v === 'object' && v !== null,
+    isTimerSettings,
   )
   const persistedTimer = useMemo(() => readPersistedTimerState(), [])
 
@@ -269,6 +282,52 @@ export default function App() {
 
   const targetEndRef = useRef<number | null>(null)
   const intervalRef = useRef<number | null>(null)
+  const audioContextRef = useRef<AudioContext | null>(null)
+  const audioErrorRef = useRef<boolean>(false)
+
+  const playCompletionTone = useCallback(() => {
+    if (!timerSettings.soundEnabled) {
+      return
+    }
+    if (!isBrowser || audioErrorRef.current) {
+      return
+    }
+    try {
+      const AudioContextConstructor =
+        (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).AudioContext ||
+        (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+      if (!AudioContextConstructor) {
+        audioErrorRef.current = true
+        return
+      }
+      const context = audioContextRef.current ?? new AudioContextConstructor()
+      audioContextRef.current = context
+      if (context.state === 'suspended') {
+        context.resume().catch(() => {
+          audioErrorRef.current = true
+        })
+      }
+      const now = context.currentTime
+      const oscillator = context.createOscillator()
+      const gain = context.createGain()
+      oscillator.type = 'sine'
+      oscillator.frequency.value = 440
+      oscillator.connect(gain)
+      gain.connect(context.destination)
+      gain.gain.setValueAtTime(0.0001, now)
+      gain.gain.exponentialRampToValueAtTime(0.08, now + 0.02)
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.35)
+      oscillator.start(now)
+      oscillator.stop(now + 0.35)
+      oscillator.onended = () => {
+        oscillator.disconnect()
+        gain.disconnect()
+      }
+    } catch (error) {
+      console.error(error)
+      audioErrorRef.current = true
+    }
+  }, [timerSettings.soundEnabled])
 
   useEffect(() => {
     if (persistedTimer.timerState === 'running' && persistedTimer.endAt) {
@@ -300,6 +359,7 @@ export default function App() {
       setRemainingMs(diff)
       if (diff <= 0) {
         if (intervalRef.current) clearInterval(intervalRef.current)
+        playCompletionTone()
         const nextMode = determineNextMode(sessionMode, 0, timerSettings.sessionsBeforeLongBreak)
         setTimerPhase('completed')
         setSessionMode(nextMode)
@@ -308,7 +368,7 @@ export default function App() {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current)
     }
-  }, [timerPhase, sessionMode, timerSettings.sessionsBeforeLongBreak])
+  }, [timerPhase, sessionMode, timerSettings.sessionsBeforeLongBreak, playCompletionTone])
 
   const startTimer = useCallback(() => {
     if (timerPhase === 'running') return
