@@ -237,6 +237,25 @@ const readPersistedTimerState = (): PersistedTimerState =>
     readLocalValue(TIMER_STATE_KEY, getFallbackTimerState, isPersistedTimerState),
   )
 
+const readHistoryFromStorage = (): HistoryEntry[] => {
+  if (!isBrowser) {
+    return DEFAULT_HISTORY_ENTRIES
+  }
+  try {
+    const stored = window.localStorage.getItem(HISTORY_KEY)
+    if (!stored) {
+      return DEFAULT_HISTORY_ENTRIES
+    }
+    const parsed = JSON.parse(stored)
+    if (!Array.isArray(parsed)) {
+      return DEFAULT_HISTORY_ENTRIES
+    }
+    return parsed.filter(isHistoryEntry)
+  } catch {
+    return DEFAULT_HISTORY_ENTRIES
+  }
+}
+
 const formatTime = (milliseconds: number) => {
   const totalSeconds = Math.ceil(milliseconds / 1000)
   const minutes = Math.floor(totalSeconds / 60)
@@ -361,8 +380,13 @@ export default function App() {
 
   const [sessionMode, setSessionMode] = useState<SessionMode>(() => persistedTimer.mode)
   const [timerPhase, setTimerPhase] = useState<TimerPhase>(() => persistedTimer.timerState)
-  const [pausedMs, setPausedMs] = useState<number | null>(() => persistedTimer.pausedRemainingMs)
+  const [pausedMs, setPausedMs] = useState<number | null>(
+    () => (persistedTimer.timerState === 'paused' && persistedTimer.pausedRemainingMs != null ? persistedTimer.pausedRemainingMs : null),
+  )
   const [remainingMs, setRemainingMs] = useState<number>(() => {
+    if (persistedTimer.timerState === 'completed') {
+      return 0
+    }
     if (persistedTimer.timerState === 'running' && persistedTimer.endAt) {
       return Math.max(0, persistedTimer.endAt - Date.now())
     }
@@ -373,18 +397,24 @@ export default function App() {
   })
 
   const [prefersReducedMotion, setPrefersReducedMotion] = useState(false)
-  const [completedMode, setCompletedMode] = useState<SessionMode | null>(null)
-
-  const [history, setHistory] = usePersistedState<HistoryEntry[]>(
-    HISTORY_KEY,
-    () => DEFAULT_HISTORY_ENTRIES,
-    isHistory,
+  const [completedMode, setCompletedMode] = useState<SessionMode | null>(() =>
+    persistedTimer.timerState === 'completed' ? persistedTimer.mode : null,
   )
+
+  const [history, setHistory] = useState<HistoryEntry[]>(() => readHistoryFromStorage())
   const [cycleState, setCycleState] = usePersistedState<CycleState>(
     CYCLE_STATE_KEY,
     () => DEFAULT_CYCLE_STATE,
     isCycleState,
   )
+
+  const appendHistoryEntry = useCallback((entry: HistoryEntry) => {
+    setHistory(prev => {
+      const updated = [...prev, entry]
+      writeLocalValue(HISTORY_KEY, updated)
+      return updated
+    })
+  }, [])
 
   const nextMode = useMemo(
     () =>
@@ -505,15 +535,12 @@ export default function App() {
         targetEndRef.current = null
 
         const sessionDurationMs = getSessionDurationMs(sessionMode, timerSettings)
-        setHistory(prev => [
-          ...prev,
-          {
-            label: sessionLabels[sessionMode],
-            time: new Date().toISOString(),
-            type: sessionMode,
-            durationMs: sessionDurationMs,
-          },
-        ])
+        appendHistoryEntry({
+          label: sessionLabels[sessionMode],
+          time: new Date().toISOString(),
+          type: sessionMode,
+          durationMs: sessionDurationMs,
+        })
 
         setCycleState(prev => {
           if (sessionMode === 'focus') {
@@ -536,6 +563,7 @@ export default function App() {
     playCompletionTone,
     cycleState.focusStreak,
     showSessionNotification,
+    appendHistoryEntry,
   ])
 
   useEffect(() => {
@@ -796,7 +824,7 @@ export default function App() {
                   value={taskInput}
                   onChange={event => setTaskInput(event.target.value)}
                   placeholder="Describe what you're working on"
-                  className={`flex-1 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-sky-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:placeholder:text-slate-500 ${sharedTokens.focusRing}`}
+                  className={`flex-1 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2 text-slate-900 placeholder:text-slate-400 focus:border-sky-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:placeholder:text-slate-500 ${sharedTokens.focusRing}`}
                 />
                 <button
                   type="submit"
