@@ -14,6 +14,8 @@ const HISTORY_KEY = 'pomodoro_history'
 const TIMER_STATE_KEY = 'pomodoro_timer_state'
 const CYCLE_STATE_KEY = 'pomodoro_cycle_state'
 
+const notificationApiAvailable = () => typeof window !== 'undefined' && 'Notification' in window
+
 type TimerSettings = {
   focus: number
   shortBreak: number
@@ -53,6 +55,8 @@ type CycleState = {
 type PresetKey = 'classic' | 'deepWork' | 'custom'
 
 type DurationPreset = Pick<TimerSettings, DurationFieldKey>
+
+type NotificationPermissionState = 'default' | 'granted' | 'denied' | 'unsupported'
 
 const PRESET_DURATION_SETTINGS: Record<Exclude<PresetKey, 'custom'>, DurationPreset> = {
   classic: {
@@ -273,7 +277,22 @@ const sessionLabels: Record<SessionMode, string> = {
   longBreak: 'Long Break',
 }
 
+const normalizeNotificationPermission = (value: NotificationPermission): NotificationPermissionState => {
+  if (value === 'granted') return 'granted'
+  if (value === 'denied') return 'denied'
+  return 'default'
+}
+
 export default function App() {
+  const notificationSupported = useMemo(() => notificationApiAvailable(), [])
+
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermissionState>(() => {
+    if (!notificationSupported) {
+      return 'unsupported'
+    }
+    return normalizeNotificationPermission(Notification.permission)
+  })
+
   const [theme, setTheme] = usePersistedState<'light' | 'dark'>(
     THEME_KEY,
     resolvePreferredTheme,
@@ -303,9 +322,6 @@ export default function App() {
 
   const [prefersReducedMotion, setPrefersReducedMotion] = useState(false)
   const [completedMode, setCompletedMode] = useState<SessionMode | null>(null)
-  const [nextMode, setNextMode] = useState<SessionMode>(() =>
-    determineNextMode(persistedTimer.mode, DEFAULT_CYCLE_STATE.focusStreak, timerSettings.sessionsBeforeLongBreak),
-  )
 
   // Persisted history and cycle state
   const [history, setHistory] = usePersistedState<HistoryEntry[]>(
@@ -317,6 +333,17 @@ export default function App() {
     CYCLE_STATE_KEY,
     () => DEFAULT_CYCLE_STATE,
     isCycleState,
+  )
+
+  // Calculate nextMode dynamically to avoid staleness
+  const nextMode = useMemo(
+    () =>
+      determineNextMode(
+        sessionMode,
+        cycleState.focusStreak,
+        timerSettings.sessionsBeforeLongBreak,
+      ),
+    [sessionMode, cycleState.focusStreak, timerSettings.sessionsBeforeLongBreak],
   )
 
   const targetEndRef = useRef<number | null>(null)
@@ -368,6 +395,23 @@ export default function App() {
     }
   }, [timerSettings.soundEnabled])
 
+  const showSessionNotification = useCallback(
+    (completed: SessionMode, upcoming: SessionMode) => {
+      if (!notificationSupported || notificationPermission !== 'granted') {
+        return
+      }
+      try {
+        new Notification(`${sessionLabels[completed]} session finished`, {
+          body: `Next up: ${sessionLabels[upcoming]}. Tap to continue your flow.`,
+          silent: !timerSettings.soundEnabled,
+        })
+      } catch (error) {
+        console.error('Unable to show notification', error)
+      }
+    },
+    [notificationPermission, notificationSupported, timerSettings.soundEnabled],
+  )
+
   useEffect(() => {
     if (persistedTimer.timerState === 'running' && persistedTimer.endAt) {
       targetEndRef.current = persistedTimer.endAt
@@ -400,8 +444,11 @@ export default function App() {
         if (intervalRef.current) clearInterval(intervalRef.current)
         playCompletionTone()
         setCompletedMode(sessionMode)
-        const upcoming = determineNextMode(sessionMode, cycleState.focusStreak, timerSettings.sessionsBeforeLongBreak)
-        setNextMode(upcoming)
+        const upcoming = determineNextMode(
+          sessionMode,
+          cycleState.focusStreak,
+          timerSettings.sessionsBeforeLongBreak,
+        )
         setTimerPhase('completed')
         setPausedMs(null)
         setRemainingMs(0)
@@ -421,12 +468,21 @@ export default function App() {
           }
           return { ...prev, focusStreak: 0 }
         })
+
+        showSessionNotification(sessionMode, upcoming)
       }
     }, 250)
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current)
     }
-  }, [timerPhase, sessionMode, timerSettings.sessionsBeforeLongBreak, playCompletionTone, cycleState.focusStreak])
+  }, [
+    timerPhase,
+    sessionMode,
+    timerSettings.sessionsBeforeLongBreak,
+    playCompletionTone,
+    cycleState.focusStreak,
+    showSessionNotification,
+  ])
 
   useEffect(() => {
     if (!isBrowser) return
@@ -448,6 +504,19 @@ export default function App() {
     }
   }, [])
 
+  const requestNotificationPermission = useCallback(() => {
+    if (!notificationSupported) {
+      return
+    }
+    Notification.requestPermission()
+      .then(permission => {
+        setNotificationPermission(normalizeNotificationPermission(permission))
+      })
+      .catch(() => {
+        setNotificationPermission('denied')
+      })
+  }, [notificationSupported])
+
   const startTimer = useCallback(() => {
     if (timerPhase === 'running') return
     const dur = timerPhase === 'paused' && pausedMs != null ? pausedMs : remainingMs
@@ -468,7 +537,6 @@ export default function App() {
   }
 
   const handleContinueToNextSession = useCallback(() => {
-    if (!nextMode) return
     const sessionDuration = getSessionDurationMs(nextMode, timerSettings)
     const endAt = Date.now() + Math.max(0, sessionDuration)
     targetEndRef.current = endAt
@@ -497,14 +565,55 @@ export default function App() {
     ? 'transition-none'
     : `${sharedTokens.motion}`
 
+  const notificationStatusLabel = useMemo(() => {
+    switch (notificationPermission) {
+      case 'granted':
+        return 'Notifications enabled'
+      case 'denied':
+        return 'Notifications blocked — adjust your browser settings to re-enable.'
+      case 'unsupported':
+        return 'Notifications are unavailable in this browser.'
+      default:
+        return 'Notifications disabled — click to allow session alerts.'
+    }
+  }, [notificationPermission])
+
+  const notificationButtonLabel = useMemo(() => {
+    if (notificationPermission === 'granted') {
+      return 'Notifications enabled'
+    }
+    if (notificationPermission === 'denied') {
+      return 'Retry enabling notifications'
+    }
+    if (notificationSupported) {
+      return 'Enable notifications'
+    }
+    return 'Notifications unavailable'
+  }, [notificationPermission, notificationSupported])
+
   const rootClasses = `${getSurfaceStyles(theme)} min-h-screen flex flex-col ${sharedTokens.motion}`
 
   return (
     <div className={rootClasses}>
-      <header className="p-4 flex justify-end">
+      <header className="p-4 flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center">
+        <div className="flex flex-col gap-1 text-xs text-slate-500 dark:text-slate-400" aria-live="polite">
+          <span>{notificationStatusLabel}</span>
+          <button
+            type="button"
+            onClick={requestNotificationPermission}
+            disabled={!notificationSupported || notificationPermission === 'granted'}
+            className={`px-3 py-1 rounded-full text-[0.65rem] font-semibold uppercase tracking-[0.3em] text-white focus-visible:outline-none ${
+              notificationSupported && notificationPermission !== 'granted'
+                ? 'bg-sky-600 hover:bg-sky-500'
+                : 'bg-slate-500 cursor-not-allowed'
+            } ${sharedTokens.motion}`}
+          >
+            {notificationButtonLabel}
+          </button>
+        </div>
         <button
           onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
-          className="px-3 py-1 bg-blue-500 text-white rounded"
+          className="px-3 py-1 bg-blue-500 text-white rounded text-sm font-semibold"
         >
           Switch to {theme === 'light' ? 'Dark' : 'Light'}
         </button>
