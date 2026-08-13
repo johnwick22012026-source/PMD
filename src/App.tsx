@@ -11,6 +11,7 @@ import React, {
 // Keys for persisted storage
 const TIMER_SETTINGS_KEY = 'pomodoro_timer_settings'
 const TIMER_STATE_KEY = 'pomodoro_timer_state'
+const PRODUCTIVITY_STATE_KEY = 'pomodoro_productivity_state'
 const TIMER_STATE_VERSION = 1
 const MINUTE_MS = 60 * 1000
 
@@ -61,6 +62,24 @@ type PersistedTimerState = {
   endAt: number | null
   cycleCount: number
   completionToken?: string
+}
+
+type DailyGoalSettings = {
+  targetPomodoros: number
+  targetFocusMinutes: number
+}
+
+type DailyProgress = {
+  date: string
+  completedPomodoros: number
+  focusMinutes: number
+}
+
+type ProductivityState = {
+  dailyGoalSettings: DailyGoalSettings
+  todayProgress: DailyProgress
+  sessionDistractions: Record<string, number>
+  taskPomodoroTotals: Record<string, number>
 }
 
 type SafeStorage = {
@@ -190,6 +209,71 @@ const isTimerSettings: StorageValidator<TimerSettings> = (value): value is Timer
     typeof candidate.autoStartBreaks === 'boolean' &&
     typeof candidate.soundEnabled === 'boolean'
   )
+}
+
+const getTodayKey = () => new Date().toISOString().split('T')[0]
+
+const isDailyGoalSettings = (value: unknown): value is DailyGoalSettings => {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as DailyGoalSettings
+  return (
+    typeof candidate.targetPomodoros === 'number' &&
+    typeof candidate.targetFocusMinutes === 'number'
+  )
+}
+
+const isDailyProgress = (value: unknown): value is DailyProgress => {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as DailyProgress
+  return (
+    typeof candidate.date === 'string' &&
+    typeof candidate.completedPomodoros === 'number' &&
+    typeof candidate.focusMinutes === 'number'
+  )
+}
+
+const isRecordOfNumbers = (value: unknown): value is Record<string, number> => {
+  if (typeof value !== 'object' || value === null) return false
+  return Object.values(value as Record<string, unknown>).every(item => typeof item === 'number')
+}
+
+const isProductivityState: StorageValidator<ProductivityState> = (value): value is ProductivityState => {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as Partial<ProductivityState>
+  return (
+    isDailyGoalSettings(candidate.dailyGoalSettings) &&
+    isDailyProgress(candidate.todayProgress) &&
+    isRecordOfNumbers(candidate.sessionDistractions ?? {}) &&
+    isRecordOfNumbers(candidate.taskPomodoroTotals ?? {})
+  )
+}
+
+const buildDefaultProductivityState = (): ProductivityState => ({
+  dailyGoalSettings: {
+    targetPomodoros: 4,
+    targetFocusMinutes: 120,
+  },
+  todayProgress: {
+    date: getTodayKey(),
+    completedPomodoros: 0,
+    focusMinutes: 0,
+  },
+  sessionDistractions: {},
+  taskPomodoroTotals: {},
+})
+
+const normalizeProductivityState = (state: ProductivityState, today = getTodayKey()): ProductivityState => {
+  if (state.todayProgress.date === today) {
+    return state
+  }
+  return {
+    ...state,
+    todayProgress: {
+      date: today,
+      completedPomodoros: 0,
+      focusMinutes: 0,
+    },
+  }
 }
 
 const isTypingElement = (target: EventTarget | null) => {
@@ -419,6 +503,25 @@ export default function App() {
     () => DEFAULT_TIMER_SETTINGS,
     isTimerSettings,
   )
+
+  const [productivityState, setProductivityState] = usePersistedState<ProductivityState>(
+    PRODUCTIVITY_STATE_KEY,
+    buildDefaultProductivityState,
+    isProductivityState,
+  )
+
+  useEffect(() => {
+    const today = getTodayKey()
+    if (productivityState.todayProgress.date === today) return
+    setProductivityState(prev => ({
+      ...prev,
+      todayProgress: {
+        date: today,
+        completedPomodoros: 0,
+        focusMinutes: 0,
+      },
+    }))
+  }, [productivityState.todayProgress.date, setProductivityState])
 
   const presetKey: PresetKey = useMemo(() => {
     const { focus, shortBreak, longBreak, sessionsBeforeLongBreak } = timerSettings
