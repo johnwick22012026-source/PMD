@@ -75,11 +75,19 @@ type DailyProgress = {
   focusMinutes: number
 }
 
+type SessionHistoryEntry = {
+  session: TimerSession
+  durationMs: number
+  distractions: number
+  task?: string
+}
+
 type ProductivityState = {
   dailyGoalSettings: DailyGoalSettings
   todayProgress: DailyProgress
   sessionDistractions: Record<string, number>
   taskPomodoroTotals: Record<string, number>
+  sessionHistory: SessionHistoryEntry[]
 }
 
 type SafeStorage = {
@@ -260,6 +268,7 @@ const buildDefaultProductivityState = (): ProductivityState => ({
   },
   sessionDistractions: {},
   taskPomodoroTotals: {},
+  sessionHistory: [],
 })
 
 const normalizeProductivityState = (state: ProductivityState, today = getTodayKey()): ProductivityState => {
@@ -523,6 +532,34 @@ export default function App() {
     }))
   }, [productivityState.todayProgress.date, setProductivityState])
 
+  const recordProductivityCompletion = useCallback(
+    (session: TimerSession, durationMs: number) => {
+      if (session !== 'focus') return
+      setProductivityState(prev => {
+        const today = getTodayKey()
+        const normalized = normalizeProductivityState(prev, today)
+        const focusMinutesToAdd = Math.round(durationMs / MINUTE_MS)
+        return {
+          ...normalized,
+          todayProgress: {
+            ...normalized.todayProgress,
+            completedPomodoros: normalized.todayProgress.completedPomodoros + 1,
+            focusMinutes: normalized.todayProgress.focusMinutes + focusMinutesToAdd,
+          },
+          sessionHistory: [
+            ...normalized.sessionHistory,
+            {
+              session: 'focus',
+              durationMs,
+              distractions: 0,
+            },
+          ],
+        }
+      })
+    },
+    [setProductivityState],
+  )
+
   const presetKey: PresetKey = useMemo(() => {
     const { focus, shortBreak, longBreak, sessionsBeforeLongBreak } = timerSettings
     if (
@@ -582,6 +619,9 @@ export default function App() {
     (state: TimerState, now: number): TimerState | null => {
       if (completionGuardRef.current === state.completionToken) return null
       completionGuardRef.current = state.completionToken
+      if (state.session === 'focus') {
+        recordProductivityCompletion(state.session, state.durationMs)
+      }
       const { nextSession, nextCycleCount } = computeNextSession(
         state.session,
         state.cycleCount,
@@ -604,7 +644,7 @@ export default function App() {
         completionToken: nextToken,
       }
     },
-    [timerSettings],
+    [recordProductivityCompletion, timerSettings],
   )
 
   const [timerState, setTimerState] = useState<TimerState>(() =>
