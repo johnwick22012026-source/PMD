@@ -205,6 +205,78 @@ const shortcutHints: ShortcutHint[] = [
   { shortcut: 'S', description: 'Skip ahead to the next session' },
 ]
 
+const TimerUI = ({
+  timerState,
+  progressPercent,
+  onStart,
+  onPause,
+  onReset,
+  onSkip,
+  onIncrementDistraction,
+  focusSessionsRemaining,
+  primaryButtonLabel,
+  showResumeHint,
+}: {
+  timerState: TimerState
+  progressPercent: number
+  onStart: () => void
+  onPause: () => void
+  onReset: () => void
+  onSkip: () => void
+  onIncrementDistraction: () => void
+  focusSessionsRemaining: number
+  primaryButtonLabel: string
+  showResumeHint: boolean
+}) => null
+
+const DailyStats = ({
+  completedPomodoros,
+  focusMinutes,
+  pomodoroGoalEnabled,
+  focusGoalEnabled,
+  pomodoroGoalPercent,
+  focusGoalPercent,
+  targetPomodoros,
+  targetFocusMinutes,
+  onTogglePomodoroGoal,
+  onToggleFocusGoal,
+  onPomodoroGoalChange,
+  onFocusGoalChange,
+}: {
+  completedPomodoros: number
+  focusMinutes: number
+  pomodoroGoalEnabled: boolean
+  focusGoalEnabled: boolean
+  pomodoroGoalPercent: number
+  focusGoalPercent: number
+  targetPomodoros: number
+  targetFocusMinutes: number
+  onTogglePomodoroGoal: () => void
+  onToggleFocusGoal: () => void
+  onPomodoroGoalChange: (e: React.ChangeEvent<HTMLInputElement>) => void
+  onFocusGoalChange: (e: React.ChangeEvent<HTMLInputElement>) => void
+}) => null
+
+const SettingsPanel = ({
+  timerSettings,
+  presetKey,
+  onPresetSelect,
+  onDurationChange,
+  onToggleAutoStartFocus,
+  onToggleAutoStartBreaks,
+  onToggleSound,
+}: {
+  timerSettings: TimerSettings
+  presetKey: PresetKey
+  onPresetSelect: (key: Exclude<PresetKey, 'custom'>) => void
+  onDurationChange: (field: DurationFieldKey, value: number) => void
+  onToggleAutoStartFocus: () => void
+  onToggleAutoStartBreaks: () => void
+  onToggleSound: () => void
+}) => null
+
+const ShortcutList = ({ hints }: { hints: ShortcutHint[] }) => null
+
 const isTimerSettings: StorageValidator<TimerSettings> = (value): value is TimerSettings => {
   if (typeof value !== 'object' || value === null) return false
 
@@ -1025,6 +1097,53 @@ export default function App() {
       )
     : 0
 
+  const taskOptions = useMemo(() => {
+    const tasksFromTotals = Object.keys(productivityState.taskPomodoroTotals);
+    const tasksFromHistory = Array.from(
+      new Set(
+        productivityState.sessionHistory
+          .map(e => e.task)
+          .filter((t): t is string => typeof t === 'string'),
+      ),
+    );
+    return Array.from(new Set([...tasksFromTotals, ...tasksFromHistory]));
+  }, [productivityState.taskPomodoroTotals, productivityState.sessionHistory]);
+
+  const [selectedTask, setSelectedTask] = useState('');
+  const selectedHistory = useMemo(
+    () => productivityState.sessionHistory.filter(e => e.task === selectedTask),
+    [productivityState.sessionHistory, selectedTask],
+  );
+  const actualPomodoros = useMemo(
+    () => selectedHistory.filter(e => e.session === 'focus').length,
+    [selectedHistory],
+  );
+  const totalFocusTimeForTask = useMemo(
+    () => selectedHistory.filter(e => e.session === 'focus').reduce((sum, e) => sum + e.durationMs, 0),
+    [selectedHistory],
+  );
+  const totalDistractionsForTask = useMemo(
+    () => selectedHistory.filter(e => e.session === 'focus').reduce((sum, e) => sum + e.distractions, 0),
+    [selectedHistory],
+  );
+  const estimatedPomodoros = productivityState.taskPomodoroTotals[selectedTask] ?? 0;
+  const percentOfEstimate = estimatedPomodoros
+    ? clamp(Math.round((actualPomodoros / estimatedPomodoros) * 100), 0, Infinity)
+    : 0;
+  let verdict = '';
+  if (selectedTask) {
+    if (estimatedPomodoros === 0 && actualPomodoros === 0) {
+      verdict = 'No estimate';
+    } else if (estimatedPomodoros === actualPomodoros) {
+      verdict = 'Met estimate';
+    } else if (actualPomodoros > estimatedPomodoros) {
+      const diff = actualPomodoros - estimatedPomodoros;
+      verdict = `Took ${diff} Pomodoro${diff > 1 ? 's' : ''} longer`;
+    } else {
+      verdict = 'Completed under estimate';
+    }
+  }
+
   // Weekly analytics computations
   const weeklyStats = useMemo(() => {
     const now = new Date();
@@ -1076,12 +1195,37 @@ export default function App() {
       <main className={`${mainGridClasses} lg:space-y-0`}>
         <div className="space-y-6">
           <section className={timerSectionBase} aria-label="Pomodoro timer control">
-            {/* Replaced placeholder: restored full timer UI markup here */}
+            <TimerUI
+              timerState={timerState}
+              progressPercent={progressPercent}
+              onStart={startOrResumeTimer}
+              onPause={pauseTimer}
+              onReset={resetTimer}
+              onSkip={skipTimer}
+              onIncrementDistraction={incrementDistraction}
+              focusSessionsRemaining={focusSessionsRemaining}
+              primaryButtonLabel={primaryButtonLabel}
+              showResumeHint={showResumeHint}
+            />
           </section>
 
           <section hidden={isFocusMode} className={statsSectionBase} aria-label="Daily productivity statistics">
-            {/* Replaced placeholder: restored daily stats JSX here */}
+            <DailyStats
+              completedPomodoros={productivityState.todayProgress.completedPomodoros}
+              focusMinutes={liveFocusMinutes}
+              pomodoroGoalEnabled={pomodoroGoalEnabled}
+              focusGoalEnabled={focusGoalEnabled}
+              pomodoroGoalPercent={pomodoroGoalPercent}
+              focusGoalPercent={focusGoalPercent}
+              targetPomodoros={productivityState.dailyGoalSettings.targetPomodoros}
+              targetFocusMinutes={productivityState.dailyGoalSettings.targetFocusMinutes}
+              onTogglePomodoroGoal={togglePomodoroGoal}
+              onToggleFocusGoal={toggleFocusGoal}
+              onPomodoroGoalChange={handlePomodoroGoalChange}
+              onFocusGoalChange={handleFocusTimeGoalChange}
+            />
           </section>
+
           <section hidden={isFocusMode} className={statsSectionBase} aria-label="Weekly productivity analytics">
             <h2 className="text-lg font-semibold mb-4">Weekly Analytics</h2>
             <div className="space-y-2">
@@ -1106,7 +1250,16 @@ export default function App() {
         </div>
 
         <section hidden={isFocusMode} className={settingsSectionBase} aria-label="Pomodoro settings and shortcut list">
-          {/* Replaced placeholder: restored settings and shortcut list JSX here */}
+          <SettingsPanel
+            timerSettings={timerSettings}
+            presetKey={presetKey}
+            onPresetSelect={handlePresetSelect}
+            onDurationChange={handleDurationChange}
+            onToggleAutoStartFocus={toggleAutoStartFocus}
+            onToggleAutoStartBreaks={toggleAutoStartBreaks}
+            onToggleSound={toggleSound}
+          />
+          <ShortcutList hints={shortcutHints} />
         </section>
       </main>
     </div>
