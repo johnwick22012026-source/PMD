@@ -506,6 +506,7 @@ export default function App() {
 
   const timerSectionBase = `min-h-0 min-w-0 rounded-3xl border border-slate-200 bg-white/80 p-6 shadow-lg shadow-slate-400/10 dark:border-slate-700 dark:bg-slate-900/70 ${reducedMotionAttribute}`
   const settingsSectionBase = `min-h-0 min-w-0 rounded-3xl border border-slate-200 bg-white/80 px-5 py-6 shadow-lg shadow-slate-400/10 dark:border-slate-700 dark:bg-slate-900/70 ${reducedMotionAttribute}`
+  const statsSectionBase = `min-h-0 min-w-0 rounded-3xl border border-slate-200 bg-white/80 p-6 shadow-lg shadow-slate-400/10 dark:border-slate-700 dark:bg-slate-900/70 ${reducedMotionAttribute}`
 
   const [timerSettings, setTimerSettings] = usePersistedState<TimerSettings>(
     TIMER_SETTINGS_KEY,
@@ -606,6 +607,54 @@ export default function App() {
   const toggleSound = useCallback(() => {
     setTimerSettings((prev: TimerSettings) => ({ ...prev, soundEnabled: !prev.soundEnabled }))
   }, [setTimerSettings])
+
+  // Daily goal configuration
+  const pomodoroGoalEnabled = productivityState.dailyGoalSettings.targetPomodoros > 0
+  const focusGoalEnabled = productivityState.dailyGoalSettings.targetFocusMinutes > 0
+  const togglePomodoroGoal = useCallback(() => {
+    setProductivityState(prev => {
+      const defaultPomodoros = buildDefaultProductivityState().dailyGoalSettings.targetPomodoros
+      return {
+        ...prev,
+        dailyGoalSettings: {
+          ...prev.dailyGoalSettings,
+          targetPomodoros: prev.dailyGoalSettings.targetPomodoros > 0 ? 0 : defaultPomodoros,
+        },
+      }
+    })
+  }, [setProductivityState])
+  const toggleFocusGoal = useCallback(() => {
+    setProductivityState(prev => {
+      const defaultFocus = buildDefaultProductivityState().dailyGoalSettings.targetFocusMinutes
+      return {
+        ...prev,
+        dailyGoalSettings: {
+          ...prev.dailyGoalSettings,
+          targetFocusMinutes: prev.dailyGoalSettings.targetFocusMinutes > 0 ? 0 : defaultFocus,
+        },
+      }
+    })
+  }, [setProductivityState])
+  const handlePomodoroGoalChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = Number(e.target.value) || 0
+    setProductivityState(prev => ({
+      ...prev,
+      dailyGoalSettings: {
+        ...prev.dailyGoalSettings,
+        targetPomodoros: val,
+      },
+    }))
+  }, [setProductivityState])
+  const handleFocusTimeGoalChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = Number(e.target.value) || 0
+    setProductivityState(prev => ({
+      ...prev,
+      dailyGoalSettings: {
+        ...prev.dailyGoalSettings,
+        targetFocusMinutes: val,
+      },
+    }))
+  }, [setProductivityState])
 
   const completionGuardRef = useRef<string | null>(null)
   const audioPlayerRef = useRef<SafeAudioPlayer | null>(null)
@@ -896,84 +945,208 @@ export default function App() {
     timerSettings.sessionsBeforeLongBreak - timerState.cycleCount,
   )
 
+  const pomodoroGoalPercent = productivityState.dailyGoalSettings.targetPomodoros
+    ? clamp(
+        Math.round(
+          (productivityState.todayProgress.completedPomodoros /
+            productivityState.dailyGoalSettings.targetPomodoros) *
+            100,
+        ),
+        0,
+        100,
+      )
+    : 0
+  const focusGoalPercent = productivityState.dailyGoalSettings.targetFocusMinutes
+    ? clamp(
+        Math.round(
+          (productivityState.todayProgress.focusMinutes /
+            productivityState.dailyGoalSettings.targetFocusMinutes) *
+            100,
+        ),
+        0,
+        100,
+      )
+    : 0
+
   return (
     <div className={rootClasses}>
       <main className={`${mainGridClasses} lg:space-y-0`}>
-        <section className={timerSectionBase} aria-label="Pomodoro timer control">
-          <header className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
-            <div>
-              <p className="text-xs uppercase tracking-[0.4em] text-slate-400 dark:text-slate-500">Current session</p>
-              <h1 className="text-3xl font-bold text-slate-900 dark:text-slate-50">
-                {timerLabel}
-              </h1>
-            </div>
-            <p className="text-sm font-semibold text-slate-600 dark:text-slate-300">
-              {focusSessionsRemaining === 0
-                ? 'Next long break is ready'
-                : `${focusSessionsRemaining} focus session${focusSessionsRemaining === 1 ? '' : 's'} until long break`}
-            </p>
-          </header>
-          <div className="mt-6 grid gap-4 md:grid-cols-[1fr_auto]">
-            <div
-              className="flex min-h-[12rem] flex-col items-center justify-center rounded-2xl border border-slate-100 bg-slate-50 px-6 py-8 text-center shadow-inner shadow-slate-200/50 dark:border-slate-800 dark:bg-slate-950/50"
-              aria-live="polite"
-              aria-atomic="true"
-            >
-              <span className="text-2xl font-semibold text-slate-500 dark:text-slate-400">
-                {timerState.session === 'focus' ? 'Focus time' : 'Break time'}
-              </span>
-              <p className="mt-3 text-5xl font-bold tracking-tight text-slate-900 dark:text-slate-50">
-                {formatTime(timerState.remainingMs)}
+        <div className="space-y-6">
+          <section className={timerSectionBase} aria-label="Pomodoro timer control">
+            <header className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-[0.4em] text-slate-400 dark:text-slate-500">Current session</p>
+                <h1 className="text-3xl font-bold text-slate-900 dark:text-slate-50">
+                  {timerLabel}
+                </h1>
+              </div>
+              <p className="text-sm font-semibold text-slate-600 dark:text-slate-300">
+                {focusSessionsRemaining === 0
+                  ? 'Next long break is ready'
+                  : `${focusSessionsRemaining} focus session${focusSessionsRemaining === 1 ? '' : 's'} until long break`}
               </p>
-              <p className="mt-1 text-sm uppercase tracking-[0.3em] text-slate-400 dark:text-slate-500">
-                {timerState.status === 'RUNNING' ? 'Running' : timerState.status === 'PAUSED' ? 'Paused' : 'Ready'}
-              </p>
+            </header>
+            <div className="mt-6 grid gap-4 md:grid-cols-[1fr_auto]">
+              <div
+                className="flex min-h-[12rem] flex-col items-center justify-center rounded-2xl border border-slate-100 bg-slate-50 px-6 py-8 text-center shadow-inner shadow-slate-200/50 dark:border-slate-800 dark:bg-slate-950/50"
+                aria-live="polite"
+                aria-atomic="true"
+              >
+                <span className="text-2xl font-semibold text-slate-500 dark:text-slate-400">
+                  {timerState.session === 'focus' ? 'Focus time' : 'Break time'}
+                </span>
+                <p className="mt-3 text-5xl font-bold tracking-tight text-slate-900 dark:text-slate-50">
+                  {formatTime(timerState.remainingMs)}
+                </p>
+                <p className="mt-1 text-sm uppercase tracking-[0.3em] text-slate-400 dark:text-slate-500">
+                  {timerState.status === 'RUNNING' ? 'Running' : timerState.status === 'PAUSED' ? 'Paused' : 'Ready'}
+                </p>
+              </div>
+              <div className="flex flex-col gap-3 rounded-2xl border border-slate-100 bg-slate-100/60 p-4 dark:border-slate-800 dark:bg-slate-900/60">
+                <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                  <div
+                    className="h-full bg-gradient-to-r from-sky-500 to-cyan-400 transition-all duration-300"
+                    style={{ width: `${progressPercent}%` }}
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={progressPercent}
+                  />
+                </div>
+                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500 dark:text-slate-400">
+                  {progressPercent}% complete
+                </p>
+                <p className="text-sm text-slate-700 dark:text-slate-300">
+                  {timerState.status === 'PAUSED' ? 'Resume the clock to continue.' : 'Keep focus and stay present.'}
+                </p>
+              </div>
             </div>
-            <div className="flex flex-col gap-3 rounded-2xl border border-slate-100 bg-slate-100/60 p-4 dark:border-slate-800 dark:bg-slate-900/60">
-              <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
-                <div
-                  className="h-full bg-gradient-to-r from-sky-500 to-cyan-400 transition-all duration-300"
-                  style={{ width: `${progressPercent}%` }}
-                  role="progressbar"
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-valuenow={progressPercent}
+            <div className="mt-6 flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={timerState.status === 'RUNNING' ? pauseTimer : startOrResumeTimer}
+                className={`group rounded-full bg-slate-900 px-6 py-3 text-sm font-semibold text-white shadow-lg transition ${focusRingClasses} ${timerState.status === 'RUNNING' ? 'hover:bg-slate-800 dark:hover:bg-slate-700' : 'hover:bg-slate-800 dark:hover:bg-slate-700'}`}
+                aria-label={primaryButtonLabel}
+              >
+                {primaryButtonLabel}
+                {showResumeHint && <span className="ml-2 text-[0.65rem] font-normal uppercase tracking-[0.3em]">Resume</span>}
+              </button>
+              <button
+                type="button"
+                onClick={resetTimer}
+                className={`rounded-full border border-slate-200 px-5 py-3 text-sm font-semibold text-slate-600 transition ${focusRingClasses} hover:border-slate-300 hover:text-slate-900 dark:border-slate-700 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:text-slate-50`}
+              >
+                Reset
+              </button>
+              <button
+                type="button"
+                onClick={skipTimer}
+                className={`rounded-full border border-transparent px-5 py-3 text-sm font-semibold text-slate-600 transition ${focusRingClasses} hover:border-slate-200 hover:bg-slate-100 dark:hover:border-slate-700 dark:hover:bg-slate-900/40`}
+              >
+                Skip
+              </button>
+            </div>
+          </section>
+
+          <section className={statsSectionBase} aria-label="Daily productivity statistics">
+            <header className="flex flex-col gap-1">
+              <p className="text-xs uppercase tracking-[0.4em] text-slate-400 dark:text-slate-500">Today&apos;s Stats</p>
+              <h2 className="text-2xl font-bold text-slate-900 dark:text-slate-50">Daily progress</h2>
+            </header>
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
+              <article className="rounded-2xl border border-slate-100 bg-slate-50/90 p-4 text-left shadow-sm shadow-slate-200/50 dark:border-slate-800 dark:bg-slate-900/60">
+                <p className="text-xs uppercase tracking-[0.3em] text-slate-400 dark:text-slate-500">Sessions completed</p>
+                <p className="mt-2 text-3xl font-semibold text-slate-900 dark:text-slate-50">{productivityState.todayProgress.completedPomodoros}</p>
+                <p className="text-xs text-slate-500 dark:text-slate-400">Focused moments of progress</p>
+                <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                  <div
+                    className="h-full bg-gradient-to-r from-sky-500 to-cyan-400 transition-all duration-300"
+                    style={{ width: `${pomodoroGoalPercent}%` }}
+                    role="presentation"
+                  />
+                </div>
+                <p className="mt-1 text-xs uppercase tracking-[0.3em] text-slate-500 dark:text-slate-400">
+                  {pomodoroGoalPercent}% of goal
+                </p>
+              </article>
+              <article className="rounded-2xl border border-slate-100 bg-slate-50/90 p-4 text-left shadow-sm shadow-slate-200/50 dark:border-slate-800 dark:bg-slate-900/60">
+                <p className="text-xs uppercase tracking-[0.3em] text-slate-400 dark:text-slate-500">Minutes focused</p>
+                <p className="mt-2 text-3xl font-semibold text-slate-900 dark:text-slate-50">{productivityState.todayProgress.focusMinutes}</p>
+                <p className="text-xs text-slate-500 dark:text-slate-400">Time tracked in focus sessions</p>
+                <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                  <div
+                    className="h-full bg-gradient-to-r from-emerald-500 to-sky-500 transition-all duration-300"
+                    style={{ width: `${focusGoalPercent}%` }}
+                    role="presentation"
+                  />
+                </div>
+                <p className="mt-1 text-xs uppercase tracking-[0.3em] text-slate-500 dark:text-slate-400">
+                  {focusGoalPercent}% of goal
+                </p>
+              </article>
+            </div>
+            <div className="mt-6 grid gap-4 md:grid-cols-2">
+              <div className="space-y-2 rounded-2xl border border-slate-100 bg-white/80 p-4 dark:border-slate-800 dark:bg-slate-900/60">
+                <div className={`flex items-center justify-between ${focusRingClasses}`}>
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.3em] text-slate-400 dark:text-slate-500">Pomodoro goal</p>
+                    <p className="text-sm font-semibold text-slate-900 dark:text-slate-50">
+                      {pomodoroGoalEnabled
+                        ? `${productivityState.todayProgress.completedPomodoros} / ${productivityState.dailyGoalSettings.targetPomodoros}`
+                        : 'Not set'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={togglePomodoroGoal}
+                    className={`rounded-full border px-3 py-1 text-[0.65rem] uppercase tracking-[0.3em] ${focusRingClasses} ${pomodoroGoalEnabled ? 'border-sky-500 text-sky-500' : 'border-slate-200 text-slate-500 dark:border-slate-700 dark:text-slate-300'}`}
+                  >
+                    {pomodoroGoalEnabled ? 'Disable' : 'Enable'}
+                  </button>
+                </div>
+                <label className="text-xs uppercase tracking-[0.3em] text-slate-500 dark:text-slate-400">Target</label>
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={productivityState.dailyGoalSettings.targetPomodoros}
+                  onChange={handlePomodoroGoalChange}
+                  className={`w-full rounded border px-2 py-1 text-right text-slate-900 dark:bg-slate-800 dark:text-slate-50 ${focusRingClasses}`}
+                  aria-label="Daily pomodoro target"
                 />
               </div>
-              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500 dark:text-slate-400">
-                {progressPercent}% complete
-              </p>
-              <p className="text-sm text-slate-700 dark:text-slate-300">
-                {timerState.status === 'PAUSED' ? 'Resume the clock to continue.' : 'Keep focus and stay present.'}
-              </p>
+              <div className="space-y-2 rounded-2xl border border-slate-100 bg-white/80 p-4 dark:border-slate-800 dark:bg-slate-900/60">
+                <div className={`flex items-center justify-between ${focusRingClasses}`}>
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.3em] text-slate-400 dark:text-slate-500">Focus minutes goal</p>
+                    <p className="text-sm font-semibold text-slate-900 dark:text-slate-50">
+                      {focusGoalEnabled
+                        ? `${productivityState.todayProgress.focusMinutes} / ${productivityState.dailyGoalSettings.targetFocusMinutes}`
+                        : 'Not set'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={toggleFocusGoal}
+                    className={`rounded-full border px-3 py-1 text-[0.65rem] uppercase tracking-[0.3em] ${focusRingClasses} ${focusGoalEnabled ? 'border-emerald-500 text-emerald-500' : 'border-slate-200 text-slate-500 dark:border-slate-700 dark:text-slate-300'}`}
+                  >
+                    {focusGoalEnabled ? 'Disable' : 'Enable'}
+                  </button>
+                </div>
+                <label className="text-xs uppercase tracking-[0.3em] text-slate-500 dark:text-slate-400">Target minutes</label>
+                <input
+                  type="number"
+                  min={0}
+                  step={5}
+                  value={productivityState.dailyGoalSettings.targetFocusMinutes}
+                  onChange={handleFocusTimeGoalChange}
+                  className={`w-full rounded border px-2 py-1 text-right text-slate-900 dark:bg-slate-800 dark:text-slate-50 ${focusRingClasses}`}
+                  aria-label="Daily focus minutes target"
+                />
+              </div>
             </div>
-          </div>
-          <div className="mt-6 flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={timerState.status === 'RUNNING' ? pauseTimer : startOrResumeTimer}
-              className={`group rounded-full bg-slate-900 px-6 py-3 text-sm font-semibold text-white shadow-lg transition ${focusRingClasses} ${timerState.status === 'RUNNING' ? 'hover:bg-slate-800 dark:hover:bg-slate-700' : 'hover:bg-slate-800 dark:hover:bg-slate-700'}`}
-              aria-label={primaryButtonLabel}
-            >
-              {primaryButtonLabel}
-              {showResumeHint && <span className="ml-2 text-[0.65rem] font-normal uppercase tracking-[0.3em]">Resume</span>}
-            </button>
-            <button
-              type="button"
-              onClick={resetTimer}
-              className={`rounded-full border border-slate-200 px-5 py-3 text-sm font-semibold text-slate-600 transition ${focusRingClasses} hover:border-slate-300 hover:text-slate-900 dark:border-slate-700 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:text-slate-50`}
-            >
-              Reset
-            </button>
-            <button
-              type="button"
-              onClick={skipTimer}
-              className={`rounded-full border border-transparent px-5 py-3 text-sm font-semibold text-slate-600 transition ${focusRingClasses} hover:border-slate-200 hover:bg-slate-100 dark:hover:border-slate-700 dark:hover:bg-slate-900/40`}
-            >
-              Skip
-            </button>
-          </div>
-        </section>
+          </section>
+        </div>
 
         <section className={settingsSectionBase} aria-label="Pomodoro settings and shortcut list">
           <div className="flex flex-col gap-2">
