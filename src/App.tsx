@@ -557,13 +557,17 @@ export default function App() {
     return () => window.clearTimeout(timeoutId)
   }, [productivityState.todayProgress.date, setProductivityState])
 
+  // Record completed focus sessions into productivity state
   const recordProductivityCompletion = useCallback(
-    (session: TimerSession, durationMs: number) => {
+    (session: TimerSession, durationMs: number, completionToken: string) => {
       if (session !== 'focus') return
       setProductivityState(prev => {
         const today = getTodayKey()
         const normalized = normalizeProductivityState(prev, today)
         const focusMinutesToAdd = Math.round(durationMs / MINUTE_MS)
+        const distractions = normalized.sessionDistractions[completionToken] || 0
+        // remove recorded session's distraction count
+        const { [completionToken]: _, ...remainingDistractions } = normalized.sessionDistractions
         return {
           ...normalized,
           todayProgress: {
@@ -571,12 +575,13 @@ export default function App() {
             completedPomodoros: normalized.todayProgress.completedPomodoros + 1,
             focusMinutes: normalized.todayProgress.focusMinutes + focusMinutesToAdd,
           },
+          sessionDistractions: remainingDistractions,
           sessionHistory: [
             ...normalized.sessionHistory,
             {
               session: 'focus',
               durationMs,
-              distractions: 0,
+              distractions,
             },
           ],
         }
@@ -693,7 +698,7 @@ export default function App() {
       if (completionGuardRef.current === state.completionToken) return null
       completionGuardRef.current = state.completionToken
       if (state.session === 'focus') {
-        recordProductivityCompletion(state.session, state.durationMs)
+        recordProductivityCompletion(state.session, state.durationMs, state.completionToken)
       }
       const { nextSession, nextCycleCount } = computeNextSession(
         state.session,
@@ -842,7 +847,7 @@ export default function App() {
         ...prev,
         status: 'RUNNING',
         endAt: nextEndAt,
-        completionToken: generateToken(prev.session, nextEndAt),
+        // preserve existing completionToken so distractions carry over on pause/resume
       }
     })
   }, [])
@@ -873,6 +878,18 @@ export default function App() {
     })
   }, [completeSessionState])
 
+  const incrementDistraction = useCallback(() => {
+    if (timerState.session !== 'focus') return
+    const token = timerState.completionToken
+    setProductivityState(prev => ({
+      ...prev,
+      sessionDistractions: {
+        ...prev.sessionDistractions,
+        [token]: (prev.sessionDistractions[token] || 0) + 1,
+      },
+    }))
+  }, [timerState.session, timerState.completionToken, setProductivityState])
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.repeat) return
@@ -901,6 +918,12 @@ export default function App() {
       if (key === 'f') {
         event.preventDefault()
         toggleFocusMode()
+        return
+      }
+
+      if (key === 'd') {
+        event.preventDefault()
+        incrementDistraction()
         return
       }
     }
@@ -1010,6 +1033,18 @@ export default function App() {
         <div className="space-y-6">
           <section className={timerSectionBase} aria-label="Pomodoro timer control">
             {/* ... timer UI omitted for brevity ... */}
+              {isFocusMode && timerState.session === 'focus' && (
+                <div className="mt-4 flex items-center justify-center space-x-2">
+                  <span>Distractions: {productivityState.sessionDistractions[timerState.completionToken] || 0}</span>
+                  <button
+                    type="button"
+                    onClick={incrementDistraction}
+                    className={focusRingClasses}
+                  >
+                    + Distraction
+                  </button>
+                </div>
+              )}
           </section>
 
           <section hidden={isFocusMode} className={statsSectionBase} aria-label="Daily productivity statistics">
