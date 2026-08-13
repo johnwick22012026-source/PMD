@@ -520,6 +520,12 @@ export default function App() {
     isProductivityState,
   )
 
+  // Focus mode state for hiding nonessential UI
+  const [isFocusMode, setIsFocusMode] = useState(false)
+  const toggleFocusMode = useCallback(() => {
+    setIsFocusMode(prev => !prev)
+  }, [])
+
   useEffect(() => {
     const today = getTodayKey()
     if (productivityState.todayProgress.date === today) return
@@ -602,28 +608,28 @@ export default function App() {
 
   const handlePresetSelect = useCallback(
     (key: Exclude<PresetKey, 'custom'>) => {
-      setTimerSettings((prev: TimerSettings) => ({ ...prev, ...PRESET_DURATION_SETTINGS[key] }))
+      setTimerSettings(prev => ({ ...prev, ...PRESET_DURATION_SETTINGS[key] }))
     },
     [setTimerSettings],
   )
 
   const handleDurationChange = useCallback(
     (field: DurationFieldKey, value: number) => {
-      setTimerSettings((prev: TimerSettings) => ({ ...prev, [field]: value }))
+      setTimerSettings(prev => ({ ...prev, [field]: value }))
     },
     [setTimerSettings],
   )
 
   const toggleAutoStartFocus = useCallback(() => {
-    setTimerSettings((prev: TimerSettings) => ({ ...prev, autoStartFocus: !prev.autoStartFocus }))
+    setTimerSettings(prev => ({ ...prev, autoStartFocus: !prev.autoStartFocus }))
   }, [setTimerSettings])
 
   const toggleAutoStartBreaks = useCallback(() => {
-    setTimerSettings((prev: TimerSettings) => ({ ...prev, autoStartBreaks: !prev.autoStartBreaks }))
+    setTimerSettings(prev => ({ ...prev, autoStartBreaks: !prev.autoStartBreaks }))
   }, [setTimerSettings])
 
   const toggleSound = useCallback(() => {
-    setTimerSettings((prev: TimerSettings) => ({ ...prev, soundEnabled: !prev.soundEnabled }))
+    setTimerSettings(prev => ({ ...prev, soundEnabled: !prev.soundEnabled }))
   }, [setTimerSettings])
 
   // Daily goal configuration
@@ -889,12 +895,19 @@ export default function App() {
 
       if (key === 's') {
         skipTimer()
+        return
+      }
+
+      if (key === 'f') {
+        event.preventDefault()
+        toggleFocusMode()
+        return
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [pauseTimer, resetTimer, skipTimer, startOrResumeTimer, timerState.status])
+  }, [pauseTimer, resetTimer, skipTimer, startOrResumeTimer, timerState.status, toggleFocusMode])
 
   useEffect(() => {
     if (timerState.status !== 'RUNNING') return
@@ -999,118 +1012,13 @@ export default function App() {
             {/* ... timer UI omitted for brevity ... */}
           </section>
 
-          <section className={statsSectionBase} aria-label="Daily productivity statistics">
-            <header className="flex flex-col gap-1">
-              <p className="text-xs uppercase tracking-[0.4em] text-slate-400 dark:text-slate-500">Today's Stats</p>
-              <h2 className="text-2xl font-bold text-slate-900 dark:text-slate-50">Daily progress</h2>
-            </header>
-            {/* Today's Focus summary card */}
-            <div className="mt-4">
-              <article className="rounded-2xl border border-slate-100 bg-slate-50/90 p-4 shadow-sm shadow-slate-200/50 dark:border-slate-800 dark:bg-slate-900/60">
-                <p className="text-xs uppercase tracking-[0.3em] text-slate-400 dark:text-slate-500">Today's Focus</p>
-                {pomodoroGoalEnabled || focusGoalEnabled ? (
-                  <>
-                    {pomodoroGoalEnabled && (
-                      <div className="mt-2 flex items-center justify-between">
-                        <span className="text-sm font-medium text-slate-900 dark:text-slate-50">Pomodoros</span>
-                        <span className="text-sm font-semibold text-slate-900 dark:text-slate-50">
-                          {productivityState.todayProgress.completedPomodoros} / {productivityState.dailyGoalSettings.targetPomodoros}
-                        </span>
-                      </div>
-                    )}
-                    {focusGoalEnabled && (
-                      <div className="mt-2 flex items-center justify-between">
-                        <span className="text-sm font-medium text-slate-900 dark:text-slate-50">Focus Minutes</span>
-                        <span className="text-sm font-semibold text-slate-900 dark:text-slate-50">
-                          {liveFocusMinutes} / {productivityState.dailyGoalSettings.targetFocusMinutes}
-                        </span>
-                      </div>
-                    )}
-                    <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
-                      <div
-                        className={`h-full ${
-                          pomodoroGoalEnabled && focusGoalEnabled
-                            ? 'bg-gradient-to-r from-sky-500 to-emerald-500'
-                            : pomodoroGoalEnabled
-                            ? 'bg-gradient-to-r from-sky-500 to-cyan-400'
-                            : 'bg-gradient-to-r from-emerald-500 to-sky-500'
-                        } transition-all duration-300`}
-                        style={{
-                          width: `${
-                            pomodoroGoalEnabled && focusGoalEnabled
-                              ? Math.round((pomodoroGoalPercent + focusGoalPercent) / 2)
-                              : pomodoroGoalEnabled
-                              ? pomodoroGoalPercent
-                              : focusGoalPercent
-                          }%`,
-                        }}
-                        role="progressbar"
-                        aria-valuemin={0}
-                        aria-valuemax={100}
-                        aria-valuenow={
-                          pomodoroGoalEnabled && focusGoalEnabled
-                            ? Math.round((pomodoroGoalPercent + focusGoalPercent) / 2)
-                            : pomodoroGoalEnabled
-                            ? pomodoroGoalPercent
-                            : focusGoalPercent
-                        }
-                      />
-                    </div>
-                    <p className="mt-1 text-xs uppercase tracking-[0.3em] text-slate-500 dark:text-slate-400">
-                      {pomodoroGoalEnabled && pomodoroGoalPercent >= 100 && focusGoalEnabled && focusGoalPercent >= 100
-                        ? 'Goal reached'
-                        : `${
-                            pomodoroGoalEnabled && focusGoalEnabled
-                              ? Math.round((pomodoroGoalPercent + focusGoalPercent) / 2)
-                              : pomodoroGoalEnabled
-                              ? pomodoroGoalPercent
-                              : focusGoalPercent
-                          }% complete`}
-                    </p>
-                  </>
-                ) : (
-                  <p className="mt-2 text-sm text-slate-700 dark:text-slate-300">No daily focus goal set</p>
-                )}
-              </article>
-            </div>
-            <div className="mt-4 grid gap-4 md:grid-cols-2">
-              <article className="rounded-2xl border border-slate-100 bg-slate-50/90 p-4 text-left shadow-sm shadow-slate-200/50 dark:border-slate-800 dark:bg-slate-900/60">
-                <p className="text-xs uppercase tracking-[0.3em] text-slate-400 dark:text-slate-500">Sessions completed</p>
-                <p className="mt-2 text-3xl font-semibold text-slate-900 dark:text-slate-50">{productivityState.todayProgress.completedPomodoros}</p>
-                <p className="text-xs text-slate-500 dark:text-slate-400">Focused moments of progress</p>
-                <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
-                  <div
-                    className="h-full bg-gradient-to-r from-sky-500 to-cyan-400 transition-all duration-300"
-                    style={{ width: `${pomodoroGoalPercent}%` }}
-                    role="presentation"
-                  />
-                </div>
-                <p className="mt-1 text-xs uppercase tracking-[0.3em] text-slate-500 dark:text-slate-400">
-                  {pomodoroGoalPercent}% of goal
-                </p>
-              </article>
-              <article className="rounded-2xl border border-slate-100 bg-slate-50/90 p-4 text-left shadow-sm shadow-slate-200/50 dark:border-slate-800 dark:bg-slate-900/60">
-                <p className="text-xs uppercase tracking-[0.3em] text-slate-400 dark:text-slate-500">Minutes focused</p>
-                <p className="mt-2 text-3xl font-semibold text-slate-900 dark:text-slate-50">{liveFocusMinutes}</p>
-                <p className="text-xs text-slate-500 dark:text-slate-400">Time tracked in focus sessions</p>
-                <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
-                  <div
-                    className="h-full bg-gradient-to-r from-emerald-500 to-sky-500 transition-all duration-300"
-                    style={{ width: `${focusGoalPercent}%` }}
-                    role="presentation"
-                  />
-                </div>
-                <p className="mt-1 text-xs uppercase tracking-[0.3em] text-slate-500 dark:text-slate-400">
-                  {focusGoalPercent}% of goal
-                </p>
-              </article>
-            </div>
-            {/* ... rest of JSX omitted for brevity ... */}
+          <section hidden={isFocusMode} className={statsSectionBase} aria-label="Daily productivity statistics">
+            {/* ... stats JSX omitted for brevity ... */}
           </section>
         </div>
 
-        <section className={settingsSectionBase} aria-label="Pomodoro settings and shortcut list">
-          {/* ... settings JSX ... */}
+        <section hidden={isFocusMode} className={settingsSectionBase} aria-label="Pomodoro settings and shortcut list">
+          {/* ... settings JSX omitted for brevity ... */}
         </section>
       </main>
     </div>
