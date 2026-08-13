@@ -533,6 +533,24 @@ export default function App() {
     }))
   }, [productivityState.todayProgress.date, setProductivityState])
 
+  useEffect(() => {
+    const now = new Date()
+    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+    const msUntilNext = next.getTime() - now.getTime()
+    const timeoutId = window.setTimeout(() => {
+      const today = getTodayKey()
+      setProductivityState(prev => ({
+        ...prev,
+        todayProgress: {
+          date: today,
+          completedPomodoros: 0,
+          focusMinutes: 0,
+        },
+      }))
+    }, msUntilNext)
+    return () => window.clearTimeout(timeoutId)
+  }, [productivityState.todayProgress.date, setProductivityState])
+
   const recordProductivityCompletion = useCallback(
     (session: TimerSession, durationMs: number) => {
       if (session !== 'focus') return
